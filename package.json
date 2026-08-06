@@ -1,7 +1,7 @@
 {
-  "name": "pi-supergsd",
+  "name": "pi-tree-like-subagent",
   "version": "0.2.8",
-  "description": "Curated, patched Superpowers skills packaged for Pi",
+  "description": "Minimal task automation for Pi using the session tree, plus a trimmed subset of Superpowers skills (fork of pi-supergsd)",
   "type": "module",
   "scripts": {
     "updater": "tsx updater/updater.ts",
@@ -17,11 +17,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/skhoroshavin/pi-supergsd.git"
+    "url": "git+https://github.com/fanjinchi/pi-tree-like-subagent.git"
   },
-  "homepage": "https://github.com/skhoroshavin/pi-supergsd#readme",
+  "homepage": "https://github.com/fanjinchi/pi-tree-like-subagent#readme",
   "bugs": {
-    "url": "https://github.com/skhoroshavin/pi-supergsd/issues"
+    "url": "https://github.com/fanjinchi/pi-tree-like-subagent/issues"
   },
   "license": "MIT",
   "files": [

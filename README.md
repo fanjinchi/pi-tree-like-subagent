@@ -1,11 +1,19 @@
-# pi-supergsd
+# pi-tree-like-subagent
 
-Curated, patched [Superpowers](https://github.com/obra/superpowers) skills for [Pi](https://pi.dev), plus minimal task-automation without subagents, using the Pi session tree.
+Minimal task automation for [Pi](https://pi.dev) without subagents, using the Pi session tree — plus a trimmed, patched subset of [Superpowers](https://github.com/obra/superpowers) skills. Fork of [pi-supergsd](https://github.com/skhoroshavin/pi-supergsd).
 
 ## Install
 
+From git:
+
 ```bash
-pi install npm:pi-supergsd
+pi install git:github.com/fanjinchi/pi-tree-like-subagent
+```
+
+Or from a local checkout (recommended for development — no copying, changes apply on reload):
+
+```bash
+pi install /absolute/path/to/pi-tree-like-subagent
 ```
 
 If Pi is already running, restart it or run `/reload`.
@@ -17,6 +25,21 @@ Pi coding agent doesn't include a built-in sub-agent tool. Its author [Mario Zec
 This extension adds a minimal task system that keeps those principles: minimal, in your control, nothing hidden. It introduces one tool (`push-task`) and a few commands. No background processes, no parallel agents. A task runs as a branch in the session tree, so standard Pi tools work as expected. Start a fresh-context review, check the results, bring them back. Or queue tasks and run them hands-free with `/auto`, while still seeing everything that's happening and able to stop, reprompt, and continue at any point.
 
 This extension also bundles a subset of [Superpowers](https://github.com/obra/superpowers) skills, adapted for Pi and routed through the task system rather than dispatching subagents.
+
+## Differences from upstream (pi-supergsd)
+
+This fork trims pi-supergsd to its task-automation core. Planning is left to dedicated tools: [pi-plan-mode](https://github.com/fanjinchi/pi-plan-mode) for read-only exploration and plan files, and [OpenSpec](https://github.com/Fission-AI/OpenSpec) for spec-driven proposal → design → tasks workflows.
+
+Removed plan-era skills (with their updater definitions):
+
+- `writing-plans`, `executing-plans`, `finishing-a-development-branch`
+- `brainstorming`, `writing-roadmaps`
+
+Remaining skills:
+
+- `requesting-code-review` / `receiving-code-review` — fresh-context code review via `push-task`
+- `systematic-debugging`, `test-driven-development`, `verification-before-completion`
+- `writing-skills`
 
 ## Tools and commands reference
 
@@ -108,6 +131,7 @@ LLM:     Implements CLI, adds tests. Let me queue a review.
 
 ## Credits
 
+- Forked from [skhoroshavin/pi-supergsd](https://github.com/skhoroshavin/pi-supergsd).
 - Skill content originates from [obra/superpowers](https://github.com/obra/superpowers).
 - Context-management ideas were inspired by [gsd-build/gsd-2](https://github.com/gsd-build/gsd-2).
 
