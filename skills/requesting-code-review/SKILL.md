@@ -58,7 +58,7 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 [Use push-task tool with review prompt]
   DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types
-  PLAN_OR_REQUIREMENTS: Task 2 from docs/superpowers/plans/deployment-plan.md
+  PLAN_OR_REQUIREMENTS: Task 2 from openspec/changes/add-deployment/tasks.md
   BASE_SHA: a7981ec
   HEAD_SHA: 3df7661
 
@@ -75,7 +75,7 @@ You: [Fix progress indicators]
 
 ## Integration with Workflows
 
-**Executing Plans:**
+**Task development (session tree):**
 - Review after each task or at natural checkpoints
 - Get feedback, apply, continue
 

@@ -22,12 +22,12 @@
         {
           "op": "replace",
           "find": "[Dispatch code reviewer subagent]\n  DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types\n  PLAN_OR_REQUIREMENTS: Task 2 from docs/superpowers/plans/deployment-plan.md\n  BASE_SHA: a7981ec\n  HEAD_SHA: 3df7661\n\n[Subagent returns]:\n  Strengths: Clean architecture, real tests\n  Issues:\n    Important: Missing progress indicators\n    Minor: Magic number (100) for reporting interval\n  Assessment: Ready to proceed",
-          "replace": "[Use push-task tool with review prompt]\n  DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types\n  PLAN_OR_REQUIREMENTS: Task 2 from docs/superpowers/plans/deployment-plan.md\n  BASE_SHA: a7981ec\n  HEAD_SHA: 3df7661\n\n[Returned task result]:\n  Strengths: Clean architecture, real tests\n  Issues:\n    Important: Missing progress indicators\n    Minor: Magic number (100) for reporting interval\n  Assessment: Ready to proceed"
+          "replace": "[Use push-task tool with review prompt]\n  DESCRIPTION: Added verifyIndex() and repairIndex() with 4 issue types\n  PLAN_OR_REQUIREMENTS: Task 2 from openspec/changes/add-deployment/tasks.md\n  BASE_SHA: a7981ec\n  HEAD_SHA: 3df7661\n\n[Returned task result]:\n  Strengths: Clean architecture, real tests\n  Issues:\n    Important: Missing progress indicators\n    Minor: Magic number (100) for reporting interval\n  Assessment: Ready to proceed"
         },
         {
           "op": "replace",
-          "find": "## Integration with Workflows\n\n**Subagent-Driven Development:**\n- Review after EACH task\n- Catch issues before they compound\n- Fix before moving to next task\n\n**Executing Plans:**",
-          "replace": "## Integration with Workflows\n\n**Executing Plans:**"
+          "find": "## Integration with Workflows\n\n**Subagent-Driven Development:**\n- Review after EACH task\n- Catch issues before they compound\n- Fix before moving to next task\n\n**Executing Plans:**\n- Review after each task or at natural checkpoints\n- Get feedback, apply, continue",
+          "replace": "## Integration with Workflows\n\n**Task development (session tree):**\n- Review after each task or at natural checkpoints\n- Get feedback, apply, continue"
         },
         {
           "op": "replace",

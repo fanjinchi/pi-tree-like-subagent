@@ -4,14 +4,14 @@ A Pi extension packaging patched [Superpowers](https://github.com/obra/superpowe
 
 ## Architecture
 
-- **`skills/`** — generated skills (from updater) + custom skills (`writing-roadmaps`). Committed. Served at runtime via `package.json` → `pi.skills`.
+- **`skills/`** — generated skills (from updater). Committed. Served at runtime via `package.json` → `pi.skills`.
 - **`updater/`** — build-time only. Clones upstream, applies declarative patches, writes results to `skills/`.
 
 ```
 updater/
 ├── updater.ts              # Entry: clones, patches, writes
 ├── common-patch.json       # Patches applied to every file after per-file patches
-├── skills/                 # JSON defs (brainstorming.json, …)
+├── skills/                 # JSON defs (requesting-code-review.json, …)
 └── lib/                    # patcher, source, types (all with tests)
 ```
 
