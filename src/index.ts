@@ -141,9 +141,40 @@ export function cmdAbortTask(pi: TaskCommandAPI): CommandOptions {
 export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
   let running = false;
   let stopCurrentRun: (() => void) | null = null;
+  let agentStartWaiter: AgentStartWaiter | null = null;
+
+  const settleAgentStartWaiter = (started: boolean): void => {
+    const waiter = agentStartWaiter;
+    if (!waiter) return;
+
+    agentStartWaiter = null;
+    clearTimeout(waiter.timeout);
+    waiter.resolve(started);
+  };
+
+  const waitForAgentStart = (taskStartId: string): Promise<boolean> => {
+    if (agentStartWaiter) {
+      throw new Error("An agent-start waiter is already active.");
+    }
+
+    return new Promise((resolve) => {
+      agentStartWaiter = {
+        taskStartId,
+        resolve,
+        timeout: setTimeout(() => settleAgentStartWaiter(false), AUTO_AGENT_START_TIMEOUT_MS),
+      };
+    });
+  };
+
+  pi.on("agent_start", (_event, ctx) => {
+    if (agentStartWaiter && currentTask(ctx.sessionManager)?.id === agentStartWaiter.taskStartId) {
+      settleAgentStartWaiter(true);
+    }
+  });
 
   pi.on("session_shutdown", async () => {
     stopCurrentRun?.();
+    settleAgentStartWaiter(false);
   });
 
   return {
@@ -182,13 +213,18 @@ export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
           if (pendingTask(ctx.sessionManager)) {
             const result = await startTask(pi, ctx, {
               statusPrefix: autoStatusOptions.prefix,
+              waitForAgentStart,
             });
-            if (result === "cancelled") break;
+            if (result === "cancelled" || result === "launch-timeout") break;
             sawTaskActivity = true;
             continue;
           }
 
-          if (currentTask(ctx.sessionManager)) {
+          const activeTask = currentTask(ctx.sessionManager);
+          if (activeTask) {
+            // 在任务分支产生回复前绝不能自动收尾。
+            if (!hasAssistantAfterTaskStart(ctx.sessionManager, activeTask.id)) break;
+
             const result = await finishTask(pi, ctx, {
               statusPrefix: autoStatusOptions.prefix,
             });
@@ -209,6 +245,7 @@ export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
           }
         }
       } finally {
+        settleAgentStartWaiter(false);
         stopCurrentRun = null;
         refreshTaskStatus(ctx);
         running = false;
@@ -279,9 +316,7 @@ type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
 type PushTaskAPI = Pick<ExtensionAPI, "appendEntry">;
 
-interface AutoCommandAPI extends TaskCommandAPI {
-  on(eventName: "session_shutdown", handler: () => unknown): void;
-}
+type AutoCommandAPI = TaskCommandAPI & Pick<ExtensionAPI, "on">;
 
 type TaskStatusTheme = Pick<Theme, "fg">;
 
@@ -294,7 +329,16 @@ type PushTaskParams = Static<typeof pushTaskParameters>;
 type TaskActionOptions = {
   statusPrefix?: string;
   modelArg?: string;
+  waitForAgentStart?: (taskStartId: string) => Promise<boolean>;
 };
+
+type AgentStartWaiter = {
+  taskStartId: string;
+  resolve: (started: boolean) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
+const AUTO_AGENT_START_TIMEOUT_MS = 60_000;
 
 function lastAssistantWasAborted(session: ReadonlySessionLike): boolean {
   const branch = session.getBranch();
@@ -304,6 +348,18 @@ function lastAssistantWasAborted(session: ReadonlySessionLike): boolean {
     last.message.role === "assistant" &&
     last.message.stopReason === "aborted"
   );
+}
+
+function hasAssistantAfterTaskStart(session: ReadonlySessionLike, taskStartId: string): boolean {
+  let afterTaskStart = false;
+  for (const entry of session.getBranch()) {
+    if (entry.id === taskStartId) {
+      afterTaskStart = true;
+      continue;
+    }
+    if (afterTaskStart && isAssistantMessageEntry(entry)) return true;
+  }
+  return false;
 }
 
 async function startTask(
@@ -365,9 +421,21 @@ async function startTask(
   }
   pi.appendEntry(TASK_START_ENTRY_TYPE, startEntryData);
 
+  // 扩展 API 会在 Pi 将 agent 标记为 active 前从 sendUserMessage 返回。
+  // 必须先建立屏障，避免 /auto 在这个窗口内误判为空闲。
+  const taskStartId = ctx.sessionManager.getLeafId()!;
+  const agentStarted = options.waitForAgentStart?.(taskStartId);
   pi.sendUserMessage(activeTask.data.prompt);
 
   refreshTaskStatus(ctx, { prefix: options.statusPrefix });
+
+  if (agentStarted && !(await agentStarted)) {
+    ctx.ui.notify(
+      `Auto stopped: the task agent did not start within ${AUTO_AGENT_START_TIMEOUT_MS / 1000} seconds. The task was preserved.`,
+      "error",
+    );
+    return "launch-timeout";
+  }
 }
 
 async function discardTask(
@@ -485,7 +553,7 @@ async function restorePreviousModel(
   }
 }
 
-type TaskActionResult = "cancelled" | void;
+type TaskActionResult = "cancelled" | "launch-timeout" | void;
 
 function refreshTaskStatus(ctx: TaskStatusContext, options: TaskStatusOptions = {}): void {
   if (ctx.hasUI) {
