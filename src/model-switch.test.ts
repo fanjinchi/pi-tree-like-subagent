@@ -15,7 +15,7 @@ describe("model switching on /start-task", () => {
     const h = await TestHarness.create();
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
     h.llm.onPrompt("some prompt", responds("Done."));
-    h.llm.onPrompt("Done.", responds("Great!"));
+    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
 
     try {
       await h.prompt("main work");
@@ -35,7 +35,7 @@ describe("model switching on /start-task", () => {
 
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
     h.llm.onPrompt("some prompt", responds("Done."));
-    h.llm.onPrompt("Done.", responds("Great!"));
+    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
 
     try {
       await h.prompt("main work");
@@ -66,7 +66,7 @@ describe("model switching on /start-task", () => {
 
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
     h.llm.onPrompt("some prompt", responds("Done."));
-    h.llm.onPrompt("Done.", responds("Great!"));
+    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
 
     try {
       await h.prompt("main work");
@@ -138,8 +138,8 @@ describe("model switching on /start-task", () => {
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
     h.llm.onPrompt("some prompt", responds("outer working..."), pushTask("BBB", "other prompt"));
     h.llm.onPrompt("other prompt", responds("inner done"));
-    h.llm.onPrompt("inner done", responds("Great!"));
-    h.llm.onPrompt("Great!", responds(""));
+    h.llm.onPrompt("[task-result: BBB]\n\ninner done", responds("Great!"));
+    h.llm.onPrompt("[task-result: AAA]\n\nGreat!", responds(""));
 
     try {
       await h.prompt("main work");
@@ -194,8 +194,8 @@ describe("model switching on /start-task", () => {
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
     h.llm.onPrompt("some prompt", responds("outer working..."), pushTask("BBB", "other prompt"));
     h.llm.onPrompt("other prompt", responds("inner done"));
-    h.llm.onPrompt("inner done", responds("Great!"));
-    h.llm.onPrompt("Great!", responds(""));
+    h.llm.onPrompt("[task-result: BBB]\n\ninner done", responds("Great!"));
+    h.llm.onPrompt("[task-result: AAA]\n\nGreat!", responds(""));
 
     try {
       await h.prompt("main work");
@@ -249,8 +249,8 @@ describe("model switching on /start-task", () => {
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
     h.llm.onPrompt("some prompt", responds("outer working..."), pushTask("BBB", "other prompt"));
     h.llm.onPrompt("other prompt", responds("inner done"));
-    h.llm.onPrompt("inner done", responds("Great!"));
-    h.llm.onPrompt("Great!", responds(""));
+    h.llm.onPrompt("[task-result: BBB]\n\ninner done", responds("Great!"));
+    h.llm.onPrompt("[task-result: AAA]\n\nGreat!", responds(""));
 
     try {
       await h.prompt("main work");
@@ -314,7 +314,7 @@ describe("model switching on /start-task", () => {
 
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
     h.llm.onPrompt("some prompt", responds("Done."));
-    h.llm.onPrompt("Done.", responds("Great!"));
+    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
 
     try {
       await h.prompt("main work");

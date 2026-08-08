@@ -29,6 +29,7 @@ export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
     promptGuidelines: [
       "Use push-task to hand off a self-contained task for isolated execution.",
       "Do not batch multiple push-task calls together, and do not mix push-task with other tool calls in the same turn.",
+      "push-task notifies the user itself; do not write any further text in the same turn after calling it.",
     ],
     parameters: pushTaskParameters,
     renderCall(args: PushTaskParams, theme, context) {
@@ -82,7 +83,12 @@ export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
       }
 
       return {
-        content: [],
+        content: [
+          {
+            type: "text",
+            text: "Task stored. Use `/start-task` or `/auto` to start it. The user has been notified - do not add any further text after this tool call.",
+          },
+        ],
         details: {
           title,
           prompt: rewritten,
@@ -415,11 +421,23 @@ async function finishTask(
 
   // Inject last assistant message after navigation
   if (lastAssistantId && lastAssistantContent !== undefined) {
+    // Normalize the captured content to plain text so it can be prefixed with
+    // the result marker (text blocks are joined with newlines).
+    const resultText =
+      typeof lastAssistantContent === "string"
+        ? lastAssistantContent
+        : lastAssistantContent.map((block) => block.text).join("\n");
+    // Prefix the result with an explicit marker so the model recognizes it as
+    // the task result (custom-message conversion drops customType/title, so a
+    // bare report reads like an ordinary user message). An empty result stays
+    // empty to avoid a dangling marker-only message.
+    const resultContent = resultText
+      ? `[task-result: ${title}]\n\n${resultText}`
+      : lastAssistantContent;
     pi.sendMessage(
       {
         customType: "task-result",
-        // Content is filtered to only TextContent blocks (or original string)
-        content: lastAssistantContent,
+        content: resultContent,
         display: true,
         details: { title },
       },
@@ -434,6 +452,13 @@ async function finishTask(
   const label = lastAssistantId ? "Last response attached." : "No last response to attach.";
   ctx.ui.notify(`Task finished. ${label}`, "info");
 
+  if (lastAssistantInterrupted(ctx.sessionManager)) {
+    ctx.ui.notify(
+      "Interrupted assistant reply detected before the result (aborted/error turn). The model may continue that old reply instead of the result.",
+      "warning",
+    );
+  }
+
   await restorePreviousModel(pi, taskStart, ctx);
 
   refreshTaskStatus(ctx, { prefix: options.statusPrefix });
@@ -443,6 +468,21 @@ type TaskCommandAPI = Pick<
   ExtensionAPI,
   "appendEntry" | "sendMessage" | "sendUserMessage" | "setModel"
 >;
+
+/**
+ * True if the last assistant message on the current branch was interrupted
+ * (stopReason "aborted" or "error"). Interrupted turns keep their partial
+ * content in the session, so after /finish-task injects the result right
+ * after them, a real LLM tends to continue the interrupted reply instead of
+ * processing the result — the user warning explains what happened.
+ */
+function lastAssistantInterrupted(session: ReadonlySessionLike): boolean {
+  const lastAssistant = findLastEntry(session, isAssistantMessageEntry);
+  return (
+    lastAssistant !== undefined &&
+    (lastAssistant.message.stopReason === "aborted" || lastAssistant.message.stopReason === "error")
+  );
+}
 
 async function abortTask(
   pi: TaskCommandAPI,

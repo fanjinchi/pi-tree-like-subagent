@@ -20,7 +20,7 @@ describe("automated workflow", () => {
     h.llm.onPrompt("main work", responds("working..."), pushTask("quick fix", "Quick fix."));
 
     h.llm.onPrompt("Quick fix.", responds("Fixed the bug."));
-    h.llm.onPrompt("Fixed the bug.", responds("Great!"));
+    h.llm.onPrompt("[task-result: quick fix]\n\nFixed the bug.", responds("Great!"));
 
     try {
       await h.prompt("main work");
@@ -56,7 +56,7 @@ describe("automated workflow", () => {
 
     // Task-execution
     h.llm.onPrompt("first task", responds("done"));
-    h.llm.onPrompt("done", responds(""));
+    h.llm.onPrompt("[task-result: x]\n\ndone", responds(""));
 
     h.user.onAssistant("done", userPrompts("/auto"));
     try {
@@ -105,7 +105,7 @@ describe("automated workflow", () => {
     h.llm.onPrompt("subtask", responds("sub done"));
 
     // Leaf continuations
-    h.llm.onPrompt("sub done", responds(""));
+    h.llm.onPrompt("[task-result: x]\n\nsub done", responds(""));
     h.llm.onPrompt("", responds(""));
     h.llm.onPrompt("working on parent...", responds(""));
 
@@ -137,7 +137,7 @@ describe("automated workflow", () => {
     h.llm.onPrompt("steer it", responds("adjusted response"));
 
     // Leaf continuations
-    h.llm.onPrompt("adjusted response", responds(""));
+    h.llm.onPrompt("[task-result: quick fix]\n\nadjusted response", responds(""));
     h.llm.onPrompt("", responds(""));
 
     h.user.onAssistant("thinking...", userPrompts("steer it"));

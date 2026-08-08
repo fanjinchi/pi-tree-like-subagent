@@ -93,7 +93,12 @@ function sessionEntries(entries: PiSessionEntry[]): SessionEntry[] {
         break;
       case "custom_message":
         if (entry.customType === "task-result" && hasTitle(entry.details)) {
-          result.push(taskResult(entry.details.title, textContent(entry.content) || undefined));
+          // Strip the "[task-result: <title>]" marker the plugin injects on
+          // delivery, so descriptors compare against the raw result content.
+          const raw = textContent(entry.content);
+          const marker = `[task-result: ${entry.details.title}]\n\n`;
+          const content = raw.startsWith(marker) ? raw.slice(marker.length) : raw;
+          result.push(taskResult(entry.details.title, content || undefined));
         }
         break;
     }

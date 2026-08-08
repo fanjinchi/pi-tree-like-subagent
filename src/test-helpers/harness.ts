@@ -19,7 +19,7 @@ import { isDeepStrictEqual } from "node:util";
 import { extractTextContent } from "../text-content.js";
 import { type SessionEntry as TestSessionEntry, TestSession } from "./test-session.js";
 import { TestUi } from "./test-ui.js";
-import { FAUX_MODEL, FAUX_PROVIDER, FauxProvider } from "./faux-provider.js";
+import { FAUX_MODEL, FAUX_PROVIDER, FauxProvider, type PromptMessage } from "./faux-provider.js";
 import { MockLLM } from "./mock-llm.js";
 import { MockUser, type MockUserAction } from "./mock-user.js";
 
@@ -146,6 +146,40 @@ export class TestHarness {
   /** Inject a raw custom entry (for testing legacy/edge-case session shapes). */
   appendCustomEntry(customType: string, data: unknown): void {
     this.sessionManager.appendCustomEntry(customType, data);
+  }
+
+  /**
+   * Inject a Pi-produced aborted assistant turn (empty text, stopReason
+   * "aborted"), as if the user pressed Esc mid-turn. Leaves the session leaf
+   * at the injected entry. Used to reproduce interrupted turns that the
+   * canonical flow cannot produce deterministically.
+   */
+  appendAbortedAssistantTurn(): void {
+    this.sessionManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "" }],
+      api: FAUX_MODEL.api,
+      provider: FAUX_MODEL.provider,
+      model: FAUX_MODEL.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "aborted",
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Role/text/stopReason of the messages the most recent LLM stream received.
+   * Undefined if no stream has happened yet.
+   */
+  lastPromptMessages(): PromptMessage[] | undefined {
+    return this.fauxProvider.lastPromptMessages;
   }
 
   assertSessionContains(...expected: TestSessionEntry[]): void {

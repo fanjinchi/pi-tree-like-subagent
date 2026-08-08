@@ -23,6 +23,12 @@ export const FAUX_MODEL: Model<string> = {
   maxTokens: 4096,
 };
 
+export type PromptMessage = {
+  role: string;
+  text: string;
+  stopReason?: string;
+};
+
 export class FauxProvider {
   constructor(
     private readonly llm: MockLLM,
@@ -49,7 +55,24 @@ export class FauxProvider {
     );
   }
 
+  private readonly recordedPrompts: PromptMessage[][] = [];
+
+  /** Role/text/stopReason of the messages in the most recent LLM stream. */
+  get lastPromptMessages(): PromptMessage[] | undefined {
+    return this.recordedPrompts[this.recordedPrompts.length - 1];
+  }
+
   stream(model: Model<string>, context: Context, options?: SimpleStreamOptions) {
+    this.recordedPrompts.push(
+      context.messages.map((message) => ({
+        role: message.role,
+        text: extractTextContent(message.content, "") ?? "",
+        ...(message.role === "assistant" && message.stopReason
+          ? { stopReason: message.stopReason }
+          : {}),
+      })),
+    );
+
     const lastUser = [...context.messages].reverse().find((message) => message.role === "user");
     const promptText = extractTextContent(lastUser?.content ?? "") ?? "";
     const responses = this.llm.matchPrompt(promptText);
