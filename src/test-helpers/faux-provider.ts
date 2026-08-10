@@ -56,6 +56,8 @@ export class FauxProvider {
   }
 
   private readonly recordedPrompts: PromptMessage[][] = [];
+  private lastLoopKey = "";
+  private consecutiveSameResponses = 0;
 
   /** Role/text/stopReason of the messages in the most recent LLM stream. */
   get lastPromptMessages(): PromptMessage[] | undefined {
@@ -77,6 +79,8 @@ export class FauxProvider {
     const promptText = extractTextContent(lastUser?.content ?? "") ?? "";
     const responses = this.llm.matchPrompt(promptText);
 
+    this.detectNoProgressLoop(context, promptText, responses);
+
     const registration = registrations.get(this);
     if (!registration) throw new Error("Faux provider registration missing.");
 
@@ -87,6 +91,43 @@ export class FauxProvider {
     registration.setResponses([message]);
 
     return piAi.streamSimple(model, context, options);
+  }
+
+  /**
+   * Guard against the Aug-2026 hang: the last-user lookup skips toolResult
+   * messages, so a rule bound to an old user message matches forever and the
+   * agent loops on the same tool call at full CPU with no timeout. Fail fast
+   * with a visible error instead of hanging the test process.
+   */
+  private detectNoProgressLoop(
+    context: Context,
+    promptText: string,
+    responses: MockLLMDescriptor[],
+  ): void {
+    const lastMessage = context.messages[context.messages.length - 1];
+    // Inside one agent turn, every LLM call after the first is preceded by a
+    // toolResult (the executed tool's output). A fresh user message means a
+    // new turn — repeated identical prompts across turns are legitimate.
+    const insideTurn = lastMessage?.role === "toolResult";
+    const key = `${promptText}\n${JSON.stringify(responses)}`;
+
+    if (insideTurn && key === this.lastLoopKey) {
+      this.consecutiveSameResponses += 1;
+      // Max 3 consecutive identical (prompt, responses) pairs inside one turn
+      // before declaring a no-progress loop: real turns append a toolResult
+      // after each tool execution, so a mock returning the same response to
+      // the same prompt is stuck.
+      if (this.consecutiveSameResponses >= 3) {
+        throw new Error(
+          `MockLLM loop detected: prompt rule "${promptText}" returned the same ` +
+            `responses ${this.consecutiveSameResponses} consecutive times inside one turn. ` +
+            "The agent would loop forever on this tool call - fix the prompt rules or the tool's terminate behavior.",
+        );
+      }
+    } else {
+      this.consecutiveSameResponses = 0;
+    }
+    this.lastLoopKey = key;
   }
 
   unregister(): void {

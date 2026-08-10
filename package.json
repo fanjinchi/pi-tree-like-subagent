@@ -6,7 +6,7 @@
   "scripts": {
     "updater": "tsx updater/updater.ts",
     "fix": "prettier --write '**/*.ts' && eslint '**/*.ts' --fix",
-    "test": "tsx --test '**/*.test.ts'",
+    "test": "tsx --test --test-timeout=30000 'src/**/*.test.ts' && tsx --test 'updater/**/*.test.ts' 'scripts/**/*.test.ts'",
     "verify": "npx tsc --noEmit && eslint '**/*.ts' && npm test && npm run updater && prettier --check '**/*.ts'"
   },
   "keywords": [
