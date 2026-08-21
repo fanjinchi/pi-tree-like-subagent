@@ -1,6 +1,6 @@
 {
   "name": "pi-tree-like-subagent",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Minimal task automation for Pi using the session tree, plus a trimmed subset of Superpowers skills (fork of pi-supergsd)",
   "type": "module",
   "scripts": {
