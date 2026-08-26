@@ -2,6 +2,44 @@
 
 Minimal task automation for [Pi](https://pi.dev) without subagents, using the Pi session tree — plus a trimmed, patched subset of [Superpowers](https://github.com/obra/superpowers) skills. Fork of [pi-supergsd](https://github.com/skhoroshavin/pi-supergsd).
 
+## 为什么有这个分叉 / Why this fork
+
+**中文**
+
+用 Pi 的 session tree 来实现"类 subagent"的任务分支，这个想法很棒。但实际使用中我发现它每次任务都从一个干净的上下文开始，于是补上了几块拼图：
+
+- **fork 启动**：任务可以直接从当前会话分叉出去执行，实现代码时不再丢失前面计划阶段的讨论上下文。
+- **task-ask**：任务执行期间可以向主线（或经主线向用户）提问，而不是闷头干到底。
+- **resume**：后续 review 发现问题时，带着意见回到当初实现代码的那个 session 分支继续修复，上下文一点不丢。
+
+另一个灵感来源是 [ttttmr/pi-context](https://github.com/ttttmr/pi-context)：它自称受 Kimi 的 d-mail 启发，让 AI 自己管理上下文、自己决定跳转到哪里——思路很有意思，但不知是不是我的使用场景问题，实际很少触发（我日常压缩上下文用的是 [billion-context-pi](https://github.com/ranxianglei/billion-context-pi)）。不过这个思路值得借鉴：本项目既然已经用 tree 来代替 subagent，task 目的明确、分支清晰，天然契合"沿 tree 跳转上下文"的想法——resume/suspend 就是把这种跳转做成了带语义的、看得见的操作。
+
+做着做着我也有点心虚：这不是越来越像"风味 subagent"了吗？最近还看到别人的 interactive-subagent 已经能实时监控任务执行，一度怀疑自己是不是造了个多余的轮子。但那个方案要手动配置开启插件工具，嫌麻烦，还是继续用这个了。
+
+对比 fork 来源 [pi-supergsd](https://github.com/skhoroshavin/pi-supergsd)，本项目的改动：
+
+- 修复了 `/finish-task` 有时不唤醒 AI 的问题；
+- 新增上面说的 fork（从当前上下文开始任务）、resume（带消息回到旧任务分支）、task-ask（任务内向主线/用户提问）；
+- 删除了打包自 Superpowers 的 `brainstorming`、`executing-plans`、`finishing-a-development-branch`、`writing-plans`、`writing-roadmaps` 技能——我自己在用 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 做工作流，感觉不再需要 Superpowers 的 plan 流程（也不知道哪个更好，详见下文 *Differences from upstream*）。
+
+**English**
+
+Using Pi's session tree to implement "subagent-like" task branches is a great idea. But in daily use I found that every task started from a clean context, so this fork adds a few missing pieces:
+
+- **Forked starts**: a task can branch off the current session, so implementing code no longer loses the planning-phase discussion context.
+- **task-ask**: a task can ask questions to the mainline (or, relayed through it, to the user) instead of working in silence.
+- **resume**: when a later review finds problems, you can send the findings back into the very session branch that wrote the code and fix it there, with full context intact.
+
+Another inspiration is [ttttmr/pi-context](https://github.com/ttttmr/pi-context), which — inspired by Kimi's d-mail — lets the AI manage its own context and decide where to jump. An interesting idea, though in my scenarios it rarely triggered (for context compression I use [billion-context-pi](https://github.com/ranxianglei/billion-context-pi)). Still, the idea is worth borrowing: since this project already uses the tree instead of subagents, and tasks have clear purposes with explicit branches, it fits naturally with "jumping along the tree" — resume/suspend turns those jumps into semantic, visible operations.
+
+Honestly, the further this goes, the more it feels like a "flavored subagent". I also noticed someone else's interactive-subagent can already monitor task execution in real time, and for a moment I wondered whether this project was redundant. But that one needs manual plugin/tool configuration — too much hassle, so I'm sticking with this.
+
+Compared with the fork source [pi-supergsd](https://github.com/skhoroshavin/pi-supergsd):
+
+- fixed a bug where `/finish-task` sometimes failed to wake the AI;
+- added the fork / resume / task-ask features described above;
+- removed the bundled Superpowers skills `brainstorming`, `executing-plans`, `finishing-a-development-branch`, `writing-plans`, `writing-roadmaps` — I use [OpenSpec](https://github.com/Fission-AI/OpenSpec) for my workflow and no longer need Superpowers' planning flow (not sure which is better; see *Differences from upstream* below).
+
 ## Install
 
 From git:
