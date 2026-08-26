@@ -203,6 +203,41 @@ export class TestHarness {
       .sort();
   }
 
+  /** Names of the currently active tools (what the LLM can call). */
+  activeToolNames(): string[] {
+    return this.session.getActiveToolNames().slice().sort();
+  }
+
+  /** The current effective system prompt (for byte-stability assertions). */
+  systemPromptText(): string {
+    return this.session.systemPrompt;
+  }
+
+  /** Force the active tool set (bypasses branch visibility sync in tests). */
+  setActiveToolNames(names: string[]): void {
+    this.session.setActiveToolsByName(names);
+  }
+
+  /** Count custom entries of the given type on the current branch. */
+  countBranchCustomEntries(customType: string): number {
+    return this.sessionManager.getBranch().filter((entry) => isCustomType(entry, customType))
+      .length;
+  }
+
+  /** Count custom entries of the given type across the whole session tree. */
+  countAllCustomEntries(customType: string): number {
+    return this.sessionManager.getEntries().filter((entry) => isCustomType(entry, customType))
+      .length;
+  }
+
+  /** Data payloads of the custom entries of the given type on the current branch. */
+  branchCustomData(customType: string): unknown[] {
+    return this.sessionManager
+      .getBranch()
+      .filter((entry) => isCustomType(entry, customType))
+      .map((entry) => (entry as { data?: unknown }).data);
+  }
+
   private commandContextActions() {
     return {
       waitForIdle: async () => {
@@ -302,12 +337,18 @@ function isTaskEntryData(entry: SessionEntry): entry is SessionEntry & {
   data: { title: string; prompt: string };
 } {
   return (
-    entry.type === "custom" &&
-    entry.customType === "task" &&
+    isCustomType(entry, "task") &&
     isRecord(entry.data) &&
     typeof entry.data.title === "string" &&
     typeof entry.data.prompt === "string"
   );
+}
+
+function isCustomType(
+  entry: SessionEntry,
+  customType: string,
+): entry is SessionEntry & { type: "custom"; customType: string; data: unknown } {
+  return entry.type === "custom" && entry.customType === customType;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

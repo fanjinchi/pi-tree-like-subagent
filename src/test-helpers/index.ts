@@ -1,6 +1,13 @@
-export { assistant, assistantAborted, task, taskResult, user } from "./test-session.js";
+export {
+  assistant,
+  assistantAborted,
+  task,
+  taskQuestion,
+  taskResult,
+  user,
+} from "./test-session.js";
 
-export { MockLLM, pushTask, responds, thinks } from "./mock-llm.js";
+export { MockLLM, pushTask, responds, resumeTask, taskAsk, thinks } from "./mock-llm.js";
 
 export { MockUser, userCtrlC, userEsc, userPrompts } from "./mock-user.js";
 

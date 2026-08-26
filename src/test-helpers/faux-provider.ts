@@ -7,6 +7,9 @@ import type { MockUserAction } from "./mock-user.js";
 
 const registrations = new WeakMap<FauxProvider, piAi.FauxProviderRegistration>();
 
+/** Only the most recent stream is ever read (lastPromptMessages); cap the history so long /auto runs do not accumulate every prompt verbatim. */
+const MAX_RECORDED_PROMPTS = 50;
+
 export const FAUX_PROVIDER = "supergsd-test";
 
 export const FAUX_MODEL: Model<string> = {
@@ -74,6 +77,9 @@ export class FauxProvider {
           : {}),
       })),
     );
+    if (this.recordedPrompts.length > MAX_RECORDED_PROMPTS) {
+      this.recordedPrompts.splice(0, this.recordedPrompts.length - MAX_RECORDED_PROMPTS);
+    }
 
     const lastUser = [...context.messages].reverse().find((message) => message.role === "user");
     const promptText = extractTextContent(lastUser?.content ?? "") ?? "";
@@ -113,14 +119,14 @@ export class FauxProvider {
 
     if (insideTurn && key === this.lastLoopKey) {
       this.consecutiveSameResponses += 1;
-      // Max 3 consecutive identical (prompt, responses) pairs inside one turn
-      // before declaring a no-progress loop: real turns append a toolResult
-      // after each tool execution, so a mock returning the same response to
-      // the same prompt is stuck.
+      // Declare a no-progress loop once the same (prompt, responses) pair has
+      // repeated 3 times inside one turn (i.e. on the 4th identical call):
+      // real turns append a toolResult after each tool execution, so a mock
+      // returning the same response to the same prompt is stuck.
       if (this.consecutiveSameResponses >= 3) {
         throw new Error(
           `MockLLM loop detected: prompt rule "${promptText}" returned the same ` +
-            `responses ${this.consecutiveSameResponses} consecutive times inside one turn. ` +
+            `responses for ${this.consecutiveSameResponses + 1} consecutive LLM calls inside one turn. ` +
             "The agent would loop forever on this tool call - fix the prompt rules or the tool's terminate behavior.",
         );
       }
@@ -165,7 +171,23 @@ function makeAssistantMessage(responses: MockLLMDescriptor[]): AssistantMessage 
           {
             title: descriptor.title,
             prompt: descriptor.prompt,
+            ...(descriptor.fork ? { fork: true } : {}),
           },
+          { id: `call-${index + 1}` },
+        );
+      case "response:resume-task":
+        return piAi.fauxToolCall(
+          "resume-task",
+          {
+            ...(descriptor.title ? { title: descriptor.title } : {}),
+            message: descriptor.message,
+          },
+          { id: `call-${index + 1}` },
+        );
+      case "response:task-ask":
+        return piAi.fauxToolCall(
+          "task-ask",
+          { question: descriptor.question },
           { id: `call-${index + 1}` },
         );
     }

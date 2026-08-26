@@ -1,3 +1,4 @@
+import assert from "node:assert";
 import { describe, it } from "node:test";
 
 import {
@@ -96,18 +97,17 @@ describe("automated workflow", () => {
     }
   });
 
-  it("processes a subtask pushed during a task", async () => {
+  it("rejects a subtask pushed during a task", async () => {
     const h = await TestHarness.create();
     h.llm.onPrompt("main work", responds("working..."), pushTask("x", "parent task"));
 
-    // Task-execution
-    h.llm.onPrompt("parent task", responds("working on parent..."), pushTask("x", "subtask"));
-    h.llm.onPrompt("subtask", responds("sub done"));
-
-    // Leaf continuations
-    h.llm.onPrompt("[task-result: x]\n\nsub done", responds(""));
-    h.llm.onPrompt("", responds(""));
-    h.llm.onPrompt("working on parent...", responds(""));
+    // push-task is hidden inside task branches (and guarded at execute time),
+    // so the nested call fails and the task finishes with its own report.
+    h.llm.onPromptSequence("parent task", [
+      [responds("working on parent..."), pushTask("x", "subtask")],
+      [responds("parent done")],
+    ]);
+    h.llm.onPrompt("[task-result: x]\n\nparent done", responds(""));
 
     try {
       await h.prompt("main work");
@@ -118,11 +118,12 @@ describe("automated workflow", () => {
         user("main work"),
         assistant("working...", "toolUse"),
         task("x", "parent task"),
-        taskResult("x"),
+        taskResult("x", "parent done"),
         assistant(""),
       );
       h.assertStatus();
-      h.assertSessionContains(user("subtask"), assistant("sub done"), taskResult("x", "sub done"));
+      // The rejected call never queued a subtask anywhere in the tree.
+      assert.strictEqual(h.countAllCustomEntries("task"), 1);
     } finally {
       h.dispose();
     }
@@ -177,6 +178,22 @@ describe("automated workflow", () => {
 
       h.assertSession(user("Shutdown task"), assistant("working..."));
       h.assertStatus("current task: x");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("notifies when auto stops before the task branch has replied", async () => {
+    const h = await TestHarness.create();
+    try {
+      // A task-start with no assistant reply after it (e.g. the session was
+      // interrupted right after /start-task) must not silently end /auto.
+      h.appendCustomEntry("task-start", { title: "AAA", returnTo: "unknown" });
+      await h.prompt("/auto");
+      h.assertLastNotification(
+        "Auto stopped: the task agent has not produced a reply yet. Re-run /auto to resume supervision.",
+      );
+      h.assertStatus("current task: AAA");
     } finally {
       h.dispose();
     }

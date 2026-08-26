@@ -3,6 +3,7 @@ import type {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
+import { taskQuestionInstructions, taskQuestionMarker, taskResultMarker } from "../index.js";
 import { extractTextContent, type TextBlock } from "../text-content.js";
 
 export class TestSession {
@@ -22,7 +23,8 @@ export type SessionEntry =
   | ReturnType<typeof assistant>
   | ReturnType<typeof assistantAborted>
   | ReturnType<typeof task>
-  | ReturnType<typeof taskResult>;
+  | ReturnType<typeof taskResult>
+  | ReturnType<typeof taskQuestion>;
 
 // ---------------------------------------------------------------------------
 // Descriptor constructors
@@ -58,6 +60,13 @@ export const taskResult = (title: string, content?: string) => ({
   customType: "task-result" as const,
   details: { title },
   ...(content !== undefined ? { content: [textBlock(content)] } : {}),
+});
+
+export const taskQuestion = (title: string, question?: string) => ({
+  type: "custom_message" as const,
+  customType: "task-question" as const,
+  details: { title },
+  ...(question !== undefined ? { content: [textBlock(question)] } : {}),
 });
 
 // ---------------------------------------------------------------------------
@@ -96,9 +105,19 @@ function sessionEntries(entries: PiSessionEntry[]): SessionEntry[] {
           // Strip the "[task-result: <title>]" marker the plugin injects on
           // delivery, so descriptors compare against the raw result content.
           const raw = textContent(entry.content);
-          const marker = `[task-result: ${entry.details.title}]\n\n`;
+          const marker = taskResultMarker(entry.details.title);
           const content = raw.startsWith(marker) ? raw.slice(marker.length) : raw;
           result.push(taskResult(entry.details.title, content || undefined));
+        } else if (entry.customType === "task-question" && hasTitle(entry.details)) {
+          // Strip the "[task-question: <title>]" marker and the relay
+          // instructions appended after the question, so descriptors compare
+          // against the raw question text.
+          const raw = textContent(entry.content);
+          const marker = taskQuestionMarker(entry.details.title);
+          let content = raw.startsWith(marker) ? raw.slice(marker.length) : raw;
+          const instructionsAt = content.indexOf(taskQuestionInstructions);
+          if (instructionsAt >= 0) content = content.slice(0, instructionsAt).trimEnd();
+          result.push(taskQuestion(entry.details.title, content || undefined));
         }
         break;
     }

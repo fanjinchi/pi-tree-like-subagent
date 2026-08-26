@@ -135,58 +135,55 @@ describe("manual workflow", () => {
             }),
           ),
         ),
-        node("push BBB", async (h) => {
-          h.llm.onPrompt("some more work", responds("okay"), pushTask("BBB", "other prompt"));
-          await h.prompt("some more work");
+      ),
+      node("push BBB on mainline", async (h) => {
+        h.llm.onPrompt("more work", responds("okay"), pushTask("BBB", "other prompt"));
+        await h.prompt("more work");
+        h.assertSession(
+          user("main work"),
+          assistant("working...", "toolUse"),
+          task("AAA", "some prompt"),
+          user("more work"),
+          assistant("okay", "toolUse"),
+          task("BBB", "other prompt"),
+        );
+        h.assertStatus("pending task: BBB");
+      }).children(
+        node("discard BBB", async (h) => {
+          await h.prompt("/discard-task");
           h.assertSession(
-            user("some prompt"),
-            assistant("Done."),
-            user("some more work"),
+            user("main work"),
+            assistant("working...", "toolUse"),
+            task("AAA", "some prompt"),
+            user("more work"),
             assistant("okay", "toolUse"),
             task("BBB", "other prompt"),
           );
-          h.assertStatus("pending task: BBB");
+          h.assertStatus("pending task: AAA");
+          h.assertLastNotification("Task discarded.");
+        }),
+        node("start BBB first (LIFO)", async (h) => {
+          await h.prompt("/start-task");
+          h.assertSession(user("other prompt"), assistant("inner done"));
+          h.assertStatus("current task: BBB");
         }).children(
-          node("discard BBB", async (h) => {
-            await h.prompt("/discard-task");
+          node("finish BBB", async (h) => {
+            await h.prompt("/finish-task");
             h.assertSession(
-              user("some prompt"),
-              assistant("Done."),
-              user("some more work"),
+              user("main work"),
+              assistant("working...", "toolUse"),
+              task("AAA", "some prompt"),
+              user("more work"),
               assistant("okay", "toolUse"),
               task("BBB", "other prompt"),
+              taskResult("BBB", "inner done"),
+              assistant("Great!"),
             );
-            h.assertStatus("current task: AAA");
-            h.assertLastNotification("Task discarded.");
+            h.assertStatus("pending task: AAA");
           }).children(
-            node("finish AAA", async (h) => {
-              await h.prompt("/finish-task");
-              h.assertSession(
-                user("main work"),
-                assistant("working...", "toolUse"),
-                task("AAA", "some prompt"),
-                taskResult("AAA", "okay"),
-                assistant("Great!"),
-              );
-              h.assertStatus();
-            }),
-          ),
-          node("start BBB", async (h) => {
-            await h.prompt("/start-task");
-            h.assertSession(user("other prompt"), assistant("inner done"));
-            h.assertStatus("current task: BBB");
-          }).children(
-            node("finish BBB", async (h) => {
-              await h.prompt("/finish-task");
-              h.assertSession(
-                user("some prompt"),
-                assistant("Done."),
-                user("some more work"),
-                assistant("okay", "toolUse"),
-                task("BBB", "other prompt"),
-                taskResult("BBB", "inner done"),
-                assistant("Great!"),
-              );
+            node("start AAA", async (h) => {
+              await h.prompt("/start-task");
+              h.assertSession(user("some prompt"), assistant("Done."));
               h.assertStatus("current task: AAA");
             }).children(
               node("finish AAA", async (h) => {
@@ -195,31 +192,12 @@ describe("manual workflow", () => {
                   user("main work"),
                   assistant("working...", "toolUse"),
                   task("AAA", "some prompt"),
-                  taskResult("AAA", "Great!"),
+                  user("more work"),
+                  assistant("okay", "toolUse"),
+                  task("BBB", "other prompt"),
+                  taskResult("BBB", "inner done"),
                   assistant("Great!"),
-                );
-                h.assertStatus();
-              }),
-            ),
-            node("abort BBB", async (h) => {
-              await h.prompt("/abort-task");
-              h.assertSession(
-                user("some prompt"),
-                assistant("Done."),
-                user("some more work"),
-                assistant("okay", "toolUse"),
-                task("BBB", "other prompt"),
-              );
-              h.assertStatus("pending task: BBB");
-              h.assertLastNotification("Task aborted. Branch abandoned without summary.");
-            }).children(
-              node("finish AAA", async (h) => {
-                await h.prompt("/finish-task");
-                h.assertSession(
-                  user("main work"),
-                  assistant("working...", "toolUse"),
-                  task("AAA", "some prompt"),
-                  taskResult("AAA", "okay"),
+                  taskResult("AAA", "Done."),
                   assistant("Great!"),
                 );
                 h.assertStatus();
@@ -260,7 +238,7 @@ describe("manual workflow", () => {
         { role: "assistant", text: "working...", stopReason: "toolUse" },
         {
           role: "toolResult",
-          text: "Task stored. Use `/start-task` or `/auto` to start it. The user has been notified - do not add any further text after this tool call.",
+          text: "Task stored. Use `/start-task` or `/auto` to start it.",
         },
         { role: "assistant", text: "", stopReason: "aborted" },
         { role: "user", text: "[task-result: AAA]\n\nDone." },
@@ -294,7 +272,7 @@ describe("manual workflow", () => {
         { role: "assistant", text: "working...", stopReason: "toolUse" },
         {
           role: "toolResult",
-          text: "Task stored. Use `/start-task` or `/auto` to start it. The user has been notified - do not add any further text after this tool call.",
+          text: "Task stored. Use `/start-task` or `/auto` to start it.",
         },
         { role: "user", text: "[task-result: AAA]\n\nDone." },
       ]);

@@ -131,52 +131,47 @@ describe("model switching on /start-task", () => {
     }
   });
 
-  it("restores original model on nested task finish", async () => {
+  it("restores original model across sequential task runs", async () => {
     const h = await TestHarness.create();
     registerTestModels(h, [{ id: "other-model", name: "Other Model" }]);
 
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
-    h.llm.onPrompt("some prompt", responds("outer working..."), pushTask("BBB", "other prompt"));
+    h.llm.onPrompt("more work", responds("okay"), pushTask("BBB", "other prompt"));
+    h.llm.onPrompt("some prompt", responds("Done."));
     h.llm.onPrompt("other prompt", responds("inner done"));
-    h.llm.onPrompt("[task-result: BBB]\n\ninner done", responds("Great!"));
-    h.llm.onPrompt("[task-result: AAA]\n\nGreat!", responds(""));
+    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
+    h.llm.onPrompt("[task-result: BBB]\n\ninner done", responds("nice"));
 
     try {
       await h.prompt("main work");
       h.assertModel("supergsd-test/deterministic");
+
+      // First task with model switch — restores deterministic on finish
       await h.prompt("/start-task other");
       h.assertModel("supergsd-test/other-model");
-      h.assertSession(
-        user("some prompt"),
-        assistant("outer working...", "toolUse"),
-        task("BBB", "other prompt"),
-      );
-
-      // Start nested without model switch — stays on other-model
-      await h.prompt("/start-task");
-      h.assertModel("supergsd-test/other-model");
-      h.assertSession(user("other prompt"), assistant("inner done"));
-
-      // Finish nested — no previousModel on its task-start, stays on other-model
+      h.assertSession(user("some prompt"), assistant("Done."));
       await h.prompt("/finish-task");
-      h.assertModel("supergsd-test/other-model");
-      h.assertSession(
-        user("some prompt"),
-        assistant("outer working...", "toolUse"),
-        task("BBB", "other prompt"),
-        taskResult("BBB", "inner done"),
-        assistant("Great!"),
-      );
+      h.assertModel("supergsd-test/deterministic");
 
-      // Finish outer — restores to deterministic
+      // Second task queued from the mainline, started without model arg —
+      // keeps the restored model.
+      await h.prompt("more work");
+      await h.prompt("/start-task");
+      h.assertModel("supergsd-test/deterministic");
+      h.assertSession(user("other prompt"), assistant("inner done"));
       await h.prompt("/finish-task");
       h.assertModel("supergsd-test/deterministic");
       h.assertSession(
         user("main work"),
         assistant("working...", "toolUse"),
         task("AAA", "some prompt"),
-        taskResult("AAA", "Great!"),
-        assistant(""),
+        taskResult("AAA", "Done."),
+        assistant("Great!"),
+        user("more work"),
+        assistant("okay", "toolUse"),
+        task("BBB", "other prompt"),
+        taskResult("BBB", "inner done"),
+        assistant("nice"),
       );
       h.assertStatus();
     } finally {
@@ -184,7 +179,7 @@ describe("model switching on /start-task", () => {
     }
   });
 
-  it("nested tasks with independent model switches", async () => {
+  it("independent model switches across sequential tasks", async () => {
     const h = await TestHarness.create();
     registerTestModels(h, [
       { id: "model-a", name: "Model A" },
@@ -192,46 +187,45 @@ describe("model switching on /start-task", () => {
     ]);
 
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
-    h.llm.onPrompt("some prompt", responds("outer working..."), pushTask("BBB", "other prompt"));
+    h.llm.onPrompt("more work", responds("okay"), pushTask("BBB", "other prompt"));
+    h.llm.onPrompt("some prompt", responds("Done."));
     h.llm.onPrompt("other prompt", responds("inner done"));
-    h.llm.onPrompt("[task-result: BBB]\n\ninner done", responds("Great!"));
-    h.llm.onPrompt("[task-result: AAA]\n\nGreat!", responds(""));
+    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
+    h.llm.onPrompt("[task-result: BBB]\n\ninner done", responds("nice"));
 
     try {
       await h.prompt("main work");
-      h.assertModel("supergsd-test/deterministic");
-      await h.prompt("/start-task model-a");
-      h.assertModel("supergsd-test/model-a");
-      h.assertSession(
-        user("some prompt"),
-        assistant("outer working...", "toolUse"),
-        task("BBB", "other prompt"),
-      );
+      await h.prompt("more work");
 
+      // LIFO: BBB starts first, with model-b
       await h.prompt("/start-task model-b");
       h.assertModel("supergsd-test/model-b");
       h.assertSession(user("other prompt"), assistant("inner done"));
 
-      // Finish inner — restores to model-a
+      // Finish — restores deterministic
       await h.prompt("/finish-task");
-      h.assertModel("supergsd-test/model-a");
-      h.assertSession(
-        user("some prompt"),
-        assistant("outer working...", "toolUse"),
-        task("BBB", "other prompt"),
-        taskResult("BBB", "inner done"),
-        assistant("Great!"),
-      );
+      h.assertModel("supergsd-test/deterministic");
+      h.assertStatus("pending task: AAA");
 
-      // Finish outer — restores to deterministic
+      // AAA starts with model-a
+      await h.prompt("/start-task model-a");
+      h.assertModel("supergsd-test/model-a");
+      h.assertSession(user("some prompt"), assistant("Done."));
+
+      // Finish — restores deterministic again
       await h.prompt("/finish-task");
       h.assertModel("supergsd-test/deterministic");
       h.assertSession(
         user("main work"),
         assistant("working...", "toolUse"),
         task("AAA", "some prompt"),
-        taskResult("AAA", "Great!"),
-        assistant(""),
+        user("more work"),
+        assistant("okay", "toolUse"),
+        task("BBB", "other prompt"),
+        taskResult("BBB", "inner done"),
+        assistant("nice"),
+        taskResult("AAA", "Done."),
+        assistant("Great!"),
       );
       h.assertStatus();
     } finally {
@@ -247,61 +241,36 @@ describe("model switching on /start-task", () => {
     ]);
 
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
-    h.llm.onPrompt("some prompt", responds("outer working..."), pushTask("BBB", "other prompt"));
-    h.llm.onPrompt("other prompt", responds("inner done"));
-    h.llm.onPrompt("[task-result: BBB]\n\ninner done", responds("Great!"));
-    h.llm.onPrompt("[task-result: AAA]\n\nGreat!", responds(""));
+    h.llm.onPrompt("some prompt", responds("Done."));
+    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
 
     try {
       await h.prompt("main work");
       // Switch to model-a (previousModel = deterministic)
       await h.prompt("/start-task model-a");
       h.assertModel("supergsd-test/model-a");
-      h.assertSession(
-        user("some prompt"),
-        assistant("outer working...", "toolUse"),
-        task("BBB", "other prompt"),
-      );
+      h.assertSession(user("some prompt"), assistant("Done."));
 
-      // Switch to model-b inside (previousModel = model-a)
-      await h.prompt("/start-task model-b");
-      h.assertModel("supergsd-test/model-b");
-      h.assertSession(user("other prompt"), assistant("inner done"));
-
-      // Re-register without model-a to make it unavailable
+      // Re-register without deterministic to make it unavailable
       h.modelRegistry.registerProvider("supergsd-test", {
         baseUrl: "memory://supergsd-test",
         apiKey: "test-key",
         api: "supergsd-test-api",
-        models: [
-          modelSpec("deterministic", "Deterministic Test Model", true),
-          modelSpec("model-b", "Model B", false),
-        ],
+        models: [modelSpec("model-a", "Model A", false), modelSpec("model-b", "Model B", false)],
       });
 
-      // Finish inner — tries to restore model-a, which is now unavailable
+      // Finish — tries to restore deterministic, which is now unavailable
       await h.prompt("/finish-task");
-      // Model stays on model-b (restore failed, active model unchanged)
-      h.assertModel("supergsd-test/model-b");
-      h.assertSession(
-        user("some prompt"),
-        assistant("outer working...", "toolUse"),
-        task("BBB", "other prompt"),
-        taskResult("BBB", "inner done"),
-        assistant("Great!"),
-      );
-      h.assertLastNotification("Previous model supergsd-test/model-a no longer available.");
-
-      // Finish outer — restores deterministic which is still available
-      await h.prompt("/finish-task");
-      h.assertModel("supergsd-test/deterministic");
+      // Model stays on model-a (restore failed, active model unchanged)
+      h.assertModel("supergsd-test/model-a");
       h.assertSession(
         user("main work"),
         assistant("working...", "toolUse"),
         task("AAA", "some prompt"),
-        taskResult("AAA", "Great!"),
-        assistant(""),
+        taskResult("AAA", "Done."),
+        assistant("Great!"),
       );
+      h.assertLastNotification("Previous model supergsd-test/deterministic no longer available.");
       h.assertStatus();
     } finally {
       h.dispose();
