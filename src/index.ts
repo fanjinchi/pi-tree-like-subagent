@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import {
   defineTool,
   type ExtensionAPI,
@@ -27,8 +29,12 @@ export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
     description: "Store a task prompt for a user-started navigation branch.",
     promptSnippet: "Store a focused task prompt for a user-started navigation branch.",
     promptGuidelines: [
-      "Use push-task to hand off a self-contained task for isolated execution.",
-      "Use fork: true when the task depends on the current conversation (e.g. implementing a plan just discussed); the task branch then inherits the current context instead of starting fresh.",
+      "Use push-task to hand off a self-contained chunk of work for isolated execution. It only queues a task - nothing runs until the user starts it (/start-task or /auto). Queue only when deferral or isolation is genuinely useful; otherwise just do the work inline.",
+      "Split work into tasks - one goal per task: a task is a single outcome the user can start, review, and accept or reject on its own. Split chained stages into separate tasks (e.g. implement, then review); don't stuff all stages into one prompt. Merge small independent fixes of the same kind into one task; don't flood the queue.",
+      "Pick a role per task and reference it in the prompt: review - fresh-context review of code or a plan (avoids author bias), reports findings with file:line and a verdict, reference /skill:task-review; research - self-contained investigation, returns a report as its only deliverable, reference /skill:task-research; implement - build from the plan just discussed, reports the change list, verification, and deviations, reference /skill:task-implement. The context mode (fork or fresh) is decided by the next rule.",
+      "Decide the context mode per task: fork: true inherits the current discussion (the branch reads all of it); omit it for a clean context, and the prompt must then be self-contained. By role: implement forks by default, but prefer fresh with the plan captured in the prompt when the mainline context is long and noisy; review stays fresh by default (its target is on disk), but fork when the review target exists only in this discussion; research is always fresh.",
+      "Use it when: the work would flood the mainline with search results, logs, or file contents you will not reference again; a fresh perspective helps (e.g. reviewing your own recent changes); the task spans many steps across multiple files with heavy tool output and the mainline only needs the final outcome; you just discussed an implementation plan (queue with fork: true so the branch inherits this context).",
+      "Do NOT use it for: quick work finishable in a few steps (the branch round-trip costs more than it saves); work that needs continuous back-and-forth with the mainline discussion; open-ended exploration or prototyping where speed matters more than isolation.",
       "Do not batch multiple push-task calls together, and do not mix push-task with other tool calls in the same turn.",
       "push-task notifies the user itself; do not write any further text in the same turn after calling it.",
     ],
@@ -56,12 +62,15 @@ export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
       const title = params.title.trim();
       const fork = params.fork === true;
 
-      const { rewritten, unresolved } = resolveSkillRefs(params.prompt);
+      const { rewritten, unresolved, resolved } = resolveSkillRefs(params.prompt);
 
       pi.appendEntry(TASK_ENTRY_TYPE, {
         title,
         prompt: rewritten,
         ...(fork ? { fork: true } : {}),
+        ...(resolved.length > 0
+          ? { skills: resolved.map((s) => ({ name: s.name, filePath: s.filePath })) }
+          : {}),
       });
 
       const storedMessage = fork
@@ -744,7 +753,8 @@ async function startTask(
     );
   }
   const agentStarted = taskStartId ? options.waitForAgentStart?.(taskStartId) : undefined;
-  pi.sendUserMessage(activeTask.data.prompt);
+  const deliveredPrompt = await inlineRoleSkills(activeTask.data.prompt, activeTask.data.skills);
+  pi.sendUserMessage(deliveredPrompt);
 
   refreshTaskStatus(ctx, { prefix: options.statusPrefix });
 
@@ -1358,7 +1368,12 @@ function isTaskData(value: unknown): value is TaskData {
     isRecord(value) &&
     typeof value.prompt === "string" &&
     (value.title === undefined || typeof value.title === "string") &&
-    (value.fork === undefined || typeof value.fork === "boolean")
+    (value.fork === undefined || typeof value.fork === "boolean") &&
+    (value.skills === undefined ||
+      (Array.isArray(value.skills) &&
+        value.skills.every(
+          (s) => isRecord(s) && typeof s.name === "string" && typeof s.filePath === "string",
+        )))
   );
 }
 
@@ -1366,6 +1381,8 @@ interface TaskData {
   title?: string;
   prompt: string;
   fork?: boolean;
+  /** Resolved role skills (/skill: refs) inlined into the delivered prompt. */
+  skills?: Array<{ name: string; filePath: string }>;
 }
 
 function isTaskStartEntry(entry: SessionEntry): entry is TaskStartEntry {
@@ -1506,29 +1523,56 @@ function taskTitle(title?: string): string {
 
 function resolveSkillRefs(prompt: string): ResolveResult {
   const unresolvedSet = new Set<string>();
-  const byName = new Map<string, string>();
+  const resolved: Skill[] = [];
+  const byName = new Map<string, Skill>();
   for (const skill of skills) {
-    byName.set(skill.name, skill.filePath);
+    byName.set(skill.name, skill);
   }
 
   const rewritten = prompt.replace(
     /\/skill:([a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9])/g,
     (match, name) => {
-      const filePath = byName.get(name);
-      if (filePath) {
-        return filePath;
+      const skill = byName.get(name);
+      if (skill) {
+        if (!resolved.some((s) => s.name === skill.name)) {
+          resolved.push(skill);
+        }
+        return skill.filePath;
       }
       unresolvedSet.add(name);
       return match;
     },
   );
 
-  return { rewritten, unresolved: [...unresolvedSet] };
+  return { rewritten, unresolved: [...unresolvedSet], resolved };
 }
 
 interface ResolveResult {
   rewritten: string;
   unresolved: string[];
+  resolved: Skill[];
+}
+
+/**
+ * Append the resolved role skills' SKILL.md content to the delivered prompt.
+ * Deterministic role loading: the task branch receives the full role contract
+ * inline instead of depending on the model reading the referenced file paths.
+ * Paths that fail to read fall back to the path reference already in the prompt.
+ */
+async function inlineRoleSkills(prompt: string, refs?: TaskData["skills"]): Promise<string> {
+  if (!refs || refs.length === 0) return prompt;
+  const sections: string[] = [];
+  for (const ref of refs) {
+    try {
+      const content = await readFile(ref.filePath, "utf8");
+      sections.push(`==== Task role skill: ${ref.name} ====\n${content}`);
+    } catch {
+      // Unreadable path (e.g. non-existent in tests): the prompt already
+      // carries the path as a fallback reference.
+    }
+  }
+  if (sections.length === 0) return prompt;
+  return `${prompt}\n\n${sections.join("\n\n")}`;
 }
 
 /**
@@ -1599,7 +1643,7 @@ const pushTaskParameters = Type.Object({
   }),
   prompt: Type.String({
     description:
-      "Full prompt for the task, including all context and instructions. Must be self-contained for fresh tasks; fork tasks may reference the current conversation.",
+      "Full prompt for the task, including all context and instructions. Must be self-contained for fresh tasks; fork tasks may reference the current conversation. Reference the task role skill in the prompt (/skill:task-review, /skill:task-research, /skill:task-implement).",
   }),
   fork: Type.Optional(
     Type.Boolean({

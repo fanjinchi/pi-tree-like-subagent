@@ -1,6 +1,16 @@
+import assert from "node:assert";
 import { describe, it } from "node:test";
+import { readFile } from "node:fs/promises";
 
-import { pushTask, task, TestHarness } from "./test-helpers/index.js";
+import {
+  assistant,
+  pushTask,
+  responds,
+  task,
+  taskResult,
+  TestHarness,
+  user,
+} from "./test-helpers/index.js";
 
 import { setSkills } from "./index.js";
 
@@ -123,6 +133,74 @@ describe("push-task skill resolution", () => {
       h.dispose();
     }
   });
+
+  it("resolves the task role skills referenced by the guidelines", async () => {
+    const h = await TestHarness.create();
+    h.llm.onPrompt(
+      "work",
+      pushTask(
+        "role example",
+        "Review the changes: /skill:task-review. Then research: /skill:task-research. Then implement: /skill:task-implement.",
+      ),
+    );
+    try {
+      setSkills(MOCK_SKILLS);
+      await h.prompt("work");
+
+      h.assertSessionContains(
+        task(
+          "role example",
+          "Review the changes: /dev/null/skills/task-review/SKILL.md. Then research: /dev/null/skills/task-research/SKILL.md. Then implement: /dev/null/skills/task-implement/SKILL.md.",
+        ),
+      );
+
+      // The resolved skills are recorded on the task entry so /start-task can
+      // inline their content into the delivered prompt.
+      const tasks = h.branchCustomData("task") as Array<{
+        skills?: Array<{ name: string; filePath: string }>;
+      }>;
+      assert.strictEqual(tasks.length, 1);
+      assert.deepEqual(tasks[0].skills, [
+        { name: "task-review", filePath: "/dev/null/skills/task-review/SKILL.md" },
+        { name: "task-research", filePath: "/dev/null/skills/task-research/SKILL.md" },
+        { name: "task-implement", filePath: "/dev/null/skills/task-implement/SKILL.md" },
+      ]);
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("inlines the resolved role skill into the delivered task prompt", async () => {
+    const h = await TestHarness.create();
+    const skillPath = new URL("../skills/task-review/SKILL.md", import.meta.url).pathname;
+    const skillContent = await readFile(skillPath, "utf8");
+    h.llm.onPrompt(
+      "main work",
+      responds("working..."),
+      pushTask("role task", "Review the changes /skill:task-review."),
+    );
+    h.llm.onPrompt("Review the changes", responds("Findings: none."));
+    h.llm.onPrompt("[task-result: role task]", responds("Thanks."));
+
+    try {
+      setSkills([TASK_REVIEW_SKILL]);
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      // The delivered prompt carries the role skill content inline.
+      h.assertSessionContains(
+        user(
+          `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent}`,
+        ),
+        assistant("Findings: none."),
+      );
+
+      await h.prompt("/finish-task");
+      h.assertSessionContains(taskResult("role task", "Findings: none."), assistant("Thanks."));
+    } finally {
+      h.dispose();
+    }
+  });
 });
 
 // Mock skill paths are project-relative for the test environment.
@@ -154,4 +232,59 @@ const MOCK_SKILLS: Skill[] = [
     },
     disableModelInvocation: false,
   },
+  {
+    name: "task-review",
+    description: "Role card for review tasks queued via push-task: independent review of code or a plan, no author bias",
+    filePath: "/dev/null/skills/task-review/SKILL.md",
+    baseDir: "/dev/null/skills/task-review",
+    sourceInfo: {
+      path: "/dev/null/skills/task-review/SKILL.md",
+      source: "project",
+      scope: "project",
+      origin: "package",
+    },
+    disableModelInvocation: true,
+  },
+  {
+    name: "task-research",
+    description: "Role card for research tasks queued via push-task: self-contained investigation, report is the only deliverable",
+    filePath: "/dev/null/skills/task-research/SKILL.md",
+    baseDir: "/dev/null/skills/task-research",
+    sourceInfo: {
+      path: "/dev/null/skills/task-research/SKILL.md",
+      source: "project",
+      scope: "project",
+      origin: "package",
+    },
+    disableModelInvocation: true,
+  },
+  {
+    name: "task-implement",
+    description: "Role card for implementation tasks queued via push-task: build from the plan, report change list and verification",
+    filePath: "/dev/null/skills/task-implement/SKILL.md",
+    baseDir: "/dev/null/skills/task-implement",
+    sourceInfo: {
+      path: "/dev/null/skills/task-implement/SKILL.md",
+      source: "project",
+      scope: "project",
+      origin: "package",
+    },
+    disableModelInvocation: true,
+  },
 ];
+
+// Real role skill pointing at the actual SKILL.md so the start-task injection
+// path can be tested end to end (the file content is read and inlined).
+const TASK_REVIEW_SKILL: Skill = {
+  name: "task-review",
+  description: "Role card for review tasks queued via push-task: independent review of code or a plan, no author bias",
+  filePath: new URL("../skills/task-review/SKILL.md", import.meta.url).pathname,
+  baseDir: new URL("../skills/task-review", import.meta.url).pathname,
+  sourceInfo: {
+    path: new URL("../skills/task-review/SKILL.md", import.meta.url).pathname,
+    source: "project",
+    scope: "project",
+    origin: "package",
+  },
+  disableModelInvocation: true,
+};

@@ -99,6 +99,12 @@ Queues a task with `title` and `prompt`. By default tasks start from fresh conte
 
 With `fork: true` the task starts **from the current context** instead: `/start-task` does not navigate away, it forks a branch right at the current leaf. Use this for implementation tasks whose prompt depends on the discussion you just had — the fork prompt may reference the current conversation ("the plan above") instead of repeating it. Fresh-task prompts must stay fully self-contained.
 
+The model is prompted to split work into tasks (one goal per task) and to pick one of three task roles per task, referenced in the prompt as `/skill:task-review`, `/skill:task-research`, or `/skill:task-implement`. When the task starts, each referenced role skill's `SKILL.md` is inlined into the branch's first message (deterministic loading — no dependence on the model reading file paths), shaping how the branch runs and reports:
+
+- **review** (fresh by default; fork when the review target exists only in the discussion) — independent review of code or a plan without author bias; reports findings with `file:line` and a verdict.
+- **research** (always fresh) — self-contained investigation; the report is the only deliverable that returns to the mainline.
+- **implement** (fork by default; fresh when the plan fits in the prompt and the mainline context is long) — builds from the plan just discussed; reports the change list, verification, and deviations.
+
 ### `resume-task` tool
 
 Queues a resume of a finished, aborted, or suspended task branch, carrying a `message` (review findings, answers, corrections) back into the task context. Optionally takes a `title` to pick a specific suspended task (defaults to the most recent). Nothing runs until `/resume-task` or `/auto` executes the request: the session navigates to the recorded branch leaf and the message is injected as a new user turn — the task AI continues with its full branch context intact.
