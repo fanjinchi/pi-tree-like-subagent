@@ -201,6 +201,42 @@ describe("push-task skill resolution", () => {
       h.dispose();
     }
   });
+
+  it("falls back to the extension's own skills dir when the registry is empty", async () => {
+    const h = await TestHarness.create();
+    const skillPath = new URL("../skills/task-review/SKILL.md", import.meta.url).pathname;
+    const skillContent = await readFile(skillPath, "utf8");
+    h.llm.onPrompt(
+      "main work",
+      responds("working..."),
+      pushTask("role task", "Review the changes /skill:task-review."),
+    );
+    h.llm.onPrompt("Review the changes", responds("Findings: none."));
+    h.llm.onPrompt("[task-result: role task]", responds("Thanks."));
+
+    try {
+      // Simulate Pi failing to load the role skill: empty registry (no
+      // before_agent_start priming). Resolution must still succeed via the
+      // extension's own bundled skills directory.
+      setSkills([]);
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      // The delivered prompt carries the role skill content inline, resolved
+      // from the extension's own skills directory.
+      h.assertSessionContains(
+        user(
+          `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent}`,
+        ),
+        assistant("Findings: none."),
+      );
+
+      await h.prompt("/finish-task");
+      h.assertSessionContains(taskResult("role task", "Findings: none."), assistant("Thanks."));
+    } finally {
+      h.dispose();
+    }
+  });
 });
 
 // Mock skill paths are project-relative for the test environment.

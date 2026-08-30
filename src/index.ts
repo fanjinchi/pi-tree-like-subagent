@@ -1,4 +1,10 @@
+import { existsSync } from "node:fs";
+
 import { readFile } from "node:fs/promises";
+
+import { dirname, join } from "node:path";
+
+import { fileURLToPath } from "node:url";
 
 import {
   defineTool,
@@ -1408,14 +1414,6 @@ function isTaskData(value: unknown): value is TaskData {
   );
 }
 
-interface TaskData {
-  title?: string;
-  prompt: string;
-  fork?: boolean;
-  /** Resolved role skills (/skill: refs) inlined into the delivered prompt. */
-  skills?: Array<{ name: string; filePath: string }>;
-}
-
 function isTaskStartEntry(entry: SessionEntry): entry is TaskStartEntry {
   return isCustomEntry(entry, TASK_START_ENTRY_TYPE, isTaskStartData);
 }
@@ -1563,7 +1561,7 @@ function resolveSkillRefs(prompt: string): ResolveResult {
   const rewritten = prompt.replace(
     /\/skill:([a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9])/g,
     (match, name) => {
-      const skill = byName.get(name);
+      const skill = byName.get(name) ?? ownSkillByName(name);
       if (skill) {
         if (!resolved.some((s) => s.name === skill.name)) {
           resolved.push(skill);
@@ -1582,6 +1580,45 @@ interface ResolveResult {
   rewritten: string;
   unresolved: string[];
   resolved: Skill[];
+}
+
+/**
+ * Fallback lookup in the extension's own bundled skills directory.
+ *
+ * The registry is primed from Pi's loaded skills via before_agent_start. If
+ * Pi fails to load a skill (e.g. a rejected frontmatter parse) or the
+ * extension runs without its package `pi.skills` metadata discovered, the
+ * role skills must still resolve, so this walks up from this file's
+ * directory looking for `skills/<name>/SKILL.md` — the extension stays
+ * self-contained instead of depending on the upstream load chain.
+ */
+function ownSkillByName(name: string): Skill | undefined {
+  const filePath = findOwnSkillFile(name);
+  if (!filePath) return undefined;
+  const baseDir = dirname(filePath);
+  return {
+    name,
+    description: `Bundled role skill resolved from the extension's own skills directory (${filePath})`,
+    filePath,
+    baseDir,
+    sourceInfo: { path: filePath, source: "project", scope: "project", origin: "package" },
+    disableModelInvocation: true,
+  };
+}
+
+function findOwnSkillFile(name: string): string | undefined {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  // Up to 8 levels of nesting covers both the repo layout (skills/ next to
+  // src/) and deeply nested node_modules installs.
+  const maxDepth = 8;
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const candidate = join(dir, "skills", name, "SKILL.md");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+  return undefined;
 }
 
 /**
@@ -1604,6 +1641,14 @@ async function inlineRoleSkills(prompt: string, refs?: TaskData["skills"]): Prom
   }
   if (sections.length === 0) return prompt;
   return `${prompt}\n\n${sections.join("\n\n")}`;
+}
+
+interface TaskData {
+  title?: string;
+  prompt: string;
+  fork?: boolean;
+  /** Resolved role skills (/skill: refs) inlined into the delivered prompt. */
+  skills?: Array<{ name: string; filePath: string }>;
 }
 
 /**
