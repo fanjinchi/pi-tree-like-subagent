@@ -202,6 +202,22 @@ describe("push-task skill resolution", () => {
     }
   });
 
+  it("keeps unknown names unchanged when the registry is empty", async () => {
+    const h = await TestHarness.create();
+    h.llm.onPrompt("work", pushTask("no skills at all", "Use /skill:zzz-no-such-skill."));
+    try {
+      setSkills([]);
+      await h.prompt("work");
+
+      h.assertSessionContains(task("no skills at all", "Use /skill:zzz-no-such-skill."));
+      h.assertLastNotification(
+        "Warning: /skill:zzz-no-such-skill were not resolved.\nTask stored. Use `/start-task` or `/auto` to start it.",
+      );
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("falls back to the extension's own skills dir when the registry is empty", async () => {
     const h = await TestHarness.create();
     const skillPath = new URL("../skills/task-review/SKILL.md", import.meta.url).pathname;

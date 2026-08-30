@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  createSyntheticSourceInfo,
   defineTool,
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -1598,20 +1599,24 @@ function ownSkillByName(name: string): Skill | undefined {
   const baseDir = dirname(filePath);
   return {
     name,
-    description: `Bundled role skill resolved from the extension's own skills directory (${filePath})`,
+    description: "Bundled role skill resolved from the extension's own skills directory.",
     filePath,
     baseDir,
-    sourceInfo: { path: filePath, source: "project", scope: "project", origin: "package" },
+    sourceInfo: createSyntheticSourceInfo(filePath, { source: "extension", origin: "package" }),
     disableModelInvocation: true,
   };
 }
 
+/**
+ * Locate `skills/<name>/SKILL.md` relative to this file. The walk is capped
+ * at depth 2 — the current directory (source layout, skills/ would sit next
+ * to src/) and the package root (published layout, skills/ next to
+ * src/index.ts) — so it never escapes the extension package and cannot pick
+ * up same-named skills from ancestor directories.
+ */
 function findOwnSkillFile(name: string): string | undefined {
   let dir = dirname(fileURLToPath(import.meta.url));
-  // Up to 8 levels of nesting covers both the repo layout (skills/ next to
-  // src/) and deeply nested node_modules installs.
-  const maxDepth = 8;
-  for (let depth = 0; depth < maxDepth; depth++) {
+  for (let depth = 0; depth < 2; depth++) {
     const candidate = join(dir, "skills", name, "SKILL.md");
     if (existsSync(candidate)) return candidate;
     const parent = dirname(dir);
@@ -1631,16 +1636,33 @@ async function inlineRoleSkills(prompt: string, refs?: TaskData["skills"]): Prom
   if (!refs || refs.length === 0) return prompt;
   const sections: string[] = [];
   for (const ref of refs) {
-    try {
-      const content = await readFile(ref.filePath, "utf8");
+    const content = await readRoleSkill(ref);
+    if (content !== undefined) {
       sections.push(`==== Task role skill: ${ref.name} ====\n${content}`);
-    } catch {
-      // Unreadable path (e.g. non-existent in tests): the prompt already
-      // carries the path as a fallback reference.
     }
   }
   if (sections.length === 0) return prompt;
   return `${prompt}\n\n${sections.join("\n\n")}`;
+}
+
+/**
+ * Read a resolved role skill's SKILL.md. If the recorded path fails to read
+ * (e.g. it vanished since push), retry once against the extension's bundled
+ * copy by name; only give up — and fall back to the path reference already
+ * in the prompt — when both are unreadable.
+ */
+async function readRoleSkill(ref: { name: string; filePath: string }): Promise<string | undefined> {
+  try {
+    return await readFile(ref.filePath, "utf8");
+  } catch {
+    const fallback = ownSkillByName(ref.name);
+    if (!fallback || fallback.filePath === ref.filePath) return undefined;
+    try {
+      return await readFile(fallback.filePath, "utf8");
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 interface TaskData {
