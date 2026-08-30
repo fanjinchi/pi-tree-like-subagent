@@ -1,6 +1,6 @@
 ---
 name: task-research
-description: Role card for research tasks queued via push-task: self-contained investigation, report is the only deliverable. Referenced with /skill:task-research; not for direct model invocation.
+description: "Role card for research tasks queued via push-task: self-contained investigation, report is the only deliverable. Referenced with /skill:task-research; not for direct model invocation."
 disable-model-invocation: true
 ---
 

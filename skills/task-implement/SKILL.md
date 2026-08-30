@@ -1,6 +1,6 @@
 ---
 name: task-implement
-description: Role card for implementation tasks queued via push-task: build from the plan, report change list and verification. Referenced with /skill:task-implement; not for direct model invocation.
+description: "Role card for implementation tasks queued via push-task: build from the plan, report change list and verification. Referenced with /skill:task-implement; not for direct model invocation."
 disable-model-invocation: true
 ---
 

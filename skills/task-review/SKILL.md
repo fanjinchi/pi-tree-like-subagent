@@ -1,6 +1,6 @@
 ---
 name: task-review
-description: Role card for review tasks queued via push-task: independent review of code or a plan, no author bias. Referenced with /skill:task-review; not for direct model invocation.
+description: "Role card for review tasks queued via push-task: independent review of code or a plan, no author bias. Referenced with /skill:task-review; not for direct model invocation."
 disable-model-invocation: true
 ---
 
