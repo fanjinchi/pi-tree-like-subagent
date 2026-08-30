@@ -1,6 +1,6 @@
 # pi-tree-like-subagent
 
-Minimal task automation for [Pi](https://pi.dev) without subagents, using the Pi session tree — plus a trimmed, patched subset of [Superpowers](https://github.com/obra/superpowers) skills. Fork of [pi-supergsd](https://github.com/skhoroshavin/pi-supergsd).
+Minimal task automation for [Pi](https://pi.dev) without subagents, using the Pi session tree. Fork of [pi-supergsd](https://github.com/skhoroshavin/pi-supergsd).
 
 ## 为什么有这个分叉 / Why this fork
 
@@ -62,7 +62,7 @@ Pi coding agent doesn't include a built-in sub-agent tool. Its author [Mario Zec
 
 This extension adds a minimal task system that keeps those principles: minimal, in your control, nothing hidden. It introduces a few tools (`push-task`, `resume-task`, `task-ask`) and commands. No background processes, no parallel agents — `/auto` is a foreground serial loop, and `task-ask` is a suspend-relay, not async execution. A task runs as a branch in the session tree, so standard Pi tools work as expected, and every state transition is a visible entry you can navigate to. Start a fresh-context review, check the results, bring them back. Fork an implementation task with the current discussion as its context. Resume a finished task with review findings. Or queue tasks and run them hands-free with `/auto`, while still seeing everything that's happening and able to stop, reprompt, and continue at any point.
 
-This extension also bundles a subset of [Superpowers](https://github.com/obra/superpowers) skills, adapted for Pi and routed through the task system rather than dispatching subagents.
+This extension also bundles the task role skills (`task-implement`, `task-research`, `task-review`) that `push-task` inlines into task prompts.
 
 ## Differences from upstream (pi-supergsd)
 
@@ -73,11 +73,11 @@ Removed plan-era skills (with their updater definitions):
 - `writing-plans`, `executing-plans`, `finishing-a-development-branch`
 - `brainstorming`, `writing-roadmaps`
 
+The upstream-sync updater has been removed entirely; all Superpowers-derived skills are gone from the bundle.
+
 Remaining skills:
 
-- `requesting-code-review` / `receiving-code-review` — fresh-context code review via `push-task`
-- `systematic-debugging`, `test-driven-development`, `verification-before-completion`
-- `writing-skills`
+- `task-implement`, `task-research`, `task-review` — task role skills inlined by `push-task` (see `/skill:` docs in the tool description)
 
 ## Tools and commands reference
 
@@ -246,7 +246,6 @@ LLM:     Implements CLI, adds tests. Phase 2 report: ...
 ## Credits
 
 - Forked from [skhoroshavin/pi-supergsd](https://github.com/skhoroshavin/pi-supergsd).
-- Skill content originates from [obra/superpowers](https://github.com/obra/superpowers).
 - Context-management ideas were inspired by [gsd-build/gsd-2](https://github.com/gsd-build/gsd-2).
 
 ## License

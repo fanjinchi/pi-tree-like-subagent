@@ -1,5 +1,0 @@
-[
-  { "op": "replace", "find": "Claude Code", "replace": "Pi" },
-  { "op": "replace", "find": "superpowers:", "replace": "/skill:" },
-  { "op": "replace", "find": "TodoWrite", "replace": "a todo list" }
-]
