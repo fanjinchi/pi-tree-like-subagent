@@ -198,4 +198,99 @@ describe("automated workflow", () => {
       h.dispose();
     }
   });
+
+  it("stops on /auto-stop while a task is running", async () => {
+    const h = await TestHarness.create();
+    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
+
+    // Task-execution
+    h.llm.onPrompt("first task", responds("working..."));
+
+    // /auto-stop executes concurrently while the task agent streams; the loop
+    // picks up the flag at the next step boundary and leaves the task open.
+    h.user.onAssistant("working...", userPrompts("/auto-stop"));
+    try {
+      await h.prompt("start");
+
+      await h.prompt("/auto");
+
+      h.assertLastNotification(
+        "Auto stop requested. It stops before the next step; the current task stays resumable.",
+      );
+      h.assertSession(user("first task"), assistant("working..."));
+      h.assertStatus("current task: x");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("warns when /auto-stop is run with no /auto loop active", async () => {
+    const h = await TestHarness.create();
+    try {
+      await h.prompt("/auto-stop");
+      h.assertSession();
+      h.assertLastNotification("Auto is not running.");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("is idempotent under repeated /auto-stop", async () => {
+    const h = await TestHarness.create();
+    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
+
+    // Task-execution
+    h.llm.onPrompt("first task", responds("working..."));
+
+    // Both commands run while the loop is still inside waitForIdle, against
+    // the same armed stop closure — a second stop is a no-op re-request.
+    h.user.onAssistant("working...", userPrompts("/auto-stop"), userPrompts("/auto-stop"));
+    try {
+      await h.prompt("start");
+
+      await h.prompt("/auto");
+
+      h.assertLastNotification(
+        "Auto stop requested. It stops before the next step; the current task stays resumable.",
+      );
+      h.assertSession(user("first task"), assistant("working..."));
+      h.assertStatus("current task: x");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("resumes supervision after /auto-stop via a new /auto run", async () => {
+    const h = await TestHarness.create();
+    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
+
+    // Task-execution
+    h.llm.onPrompt("first task", responds("working..."));
+
+    // Mainline continuation after the second /auto run finalizes the open task.
+    h.llm.onPrompt("[task-result: x]\n\nworking...", responds(""));
+
+    h.user.onAssistant("working...", userPrompts("/auto-stop"));
+    try {
+      await h.prompt("start");
+
+      await h.prompt("/auto");
+      // First run stopped at the step boundary; the task is left open.
+      h.assertStatus("current task: x");
+
+      // Re-running /auto picks the open task back up and finalizes it.
+      await h.prompt("/auto");
+
+      h.assertSession(
+        user("start"),
+        assistant("", "toolUse"),
+        task("x", "first task"),
+        taskResult("x", "working..."),
+        assistant(""),
+      );
+      h.assertStatus("suspended: x");
+    } finally {
+      h.dispose();
+    }
+  });
 });

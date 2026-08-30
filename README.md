@@ -81,15 +81,18 @@ Remaining skills:
 
 ## Tools and commands reference
 
-| Command               | Action                                                                               |
-| --------------------- | ------------------------------------------------------------------------------------ |
-| `/start-task [model]` | Saves a checkpoint and starts the pending task in a new branch                       |
-| `/finish-task`        | Returns from task branch to saved checkpoint with the assistant response as a result |
-| `/abort-task`         | Returns from task branch to saved checkpoint without attaching any result            |
-| `/discard-task`       | Discards a pending task without executing it                                         |
-| `/resume-task [text]` | Resumes the most recently suspended task branch (or a queued resume-task request)    |
-| `/suspend-task`       | Suspends the current task and returns to the mainline (relays a pending question)    |
-| `/auto`               | EXPERIMENTAL! Runs pending tasks and queued resumes hands-free, relaying questions   |
+| Command               | Action                                                                                  |
+| --------------------- | --------------------------------------------------------------------------------------- |
+| `/start-task [model]` | Saves a checkpoint and starts the pending task in a new branch                          |
+| `/finish-task`        | Returns from task branch to saved checkpoint with the assistant response as a result    |
+| `/abort-task`         | Returns from task branch to saved checkpoint without attaching any result               |
+| `/discard-task`       | Discards a pending task without executing it                                            |
+| `/resume-task [text]` | Resumes the most recently suspended task branch (or a queued resume-task request)       |
+| `/suspend-task`       | Suspends the current task and returns to the mainline (relays a pending question)       |
+| `/auto`               | EXPERIMENTAL! Runs pending tasks and queued resumes hands-free, relaying questions      |
+| `/auto-stop`          | Stops the running `/auto` loop at the next step boundary (current task stays resumable) |
+
+`/auto` runs as a foreground loop: type `/auto-stop` (works even while the loop is waiting) to end it gracefully after the current step — the running task is left suspended/current and can be resumed with `/resume-task` or by re-running `/auto`. Esc meanwhile interrupts the currently streaming agent turn, which also ends the loop.
 
 If `[model]` is passed to `/start-task`, the model switches before the task prompt is sent. On `/finish-task`, `/abort-task`, or `/suspend-task`, the original model is restored.
 

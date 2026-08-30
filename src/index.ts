@@ -340,6 +340,7 @@ export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
       stopCurrentRun = () => {
         stopped = true;
       };
+      stopAutoLoop = stopCurrentRun;
 
       const autoStatusOptions = {
         prefix: "[auto] ",
@@ -425,9 +426,27 @@ export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
         }
       } finally {
         settleAgentStartWaiter(false);
+        stopAutoLoop = null;
         stopCurrentRun = null;
         refreshTaskStatus(ctx);
         running = false;
+      }
+    },
+  };
+}
+
+export function cmdAutoStop(): CommandOptions {
+  return {
+    description: "Stop the running /auto loop at the next step boundary",
+    handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      if (stopAutoLoop) {
+        stopAutoLoop();
+        ctx.ui.notify(
+          "Auto stop requested. It stops before the next step; the current task stays resumable.",
+          "info",
+        );
+      } else {
+        ctx.ui.notify("Auto is not running.", "warning");
       }
     },
   };
@@ -1639,6 +1658,11 @@ function matchModels(pattern: string, registry: ModelRegistry): Model<Api>[] {
         `${m.provider}/${m.id}`.toLowerCase().includes(lower),
     );
 }
+
+// Set while cmdAuto's loop is running; /auto-stop calls it to request a
+// graceful stop at the next step boundary (no idempotence issue: the loop
+// re-checks the stopped flag after every waitForIdle).
+let stopAutoLoop: (() => void) | null = null;
 
 /**
  * Tool order captured at the first visibility sync. Pi rebuilds the system

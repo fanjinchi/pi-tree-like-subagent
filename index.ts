@@ -4,6 +4,7 @@ import {
   captureToolOrder,
   cmdAbortTask,
   cmdAuto,
+  cmdAutoStop,
   cmdDiscardTask,
   cmdFinishTask,
   cmdResumeTask,
@@ -31,6 +32,7 @@ export default function register(pi: ExtensionAPI): void {
   pi.registerCommand("resume-task", cmdResumeTask(pi));
   pi.registerCommand("suspend-task", cmdSuspendTask(pi));
   pi.registerCommand("auto", cmdAuto(pi));
+  pi.registerCommand("auto-stop", cmdAutoStop());
 
   pi.registerMessageRenderer("task-result", rendererTaskResult);
   pi.registerMessageRenderer("task-question", rendererTaskQuestion);
