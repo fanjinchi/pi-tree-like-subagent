@@ -34,7 +34,7 @@ describe("automated workflow", () => {
         taskResult("quick fix", "Fixed the bug."),
         assistant("Great!"),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: quick fix");
     } finally {
       h.dispose();
     }
@@ -72,7 +72,7 @@ describe("automated workflow", () => {
         taskResult("x", "done"),
         assistant(""),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: x");
     } finally {
       h.dispose();
     }
@@ -121,7 +121,7 @@ describe("automated workflow", () => {
         taskResult("x", "parent done"),
         assistant(""),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: x");
       // The rejected call never queued a subtask anywhere in the tree.
       assert.strictEqual(h.countAllCustomEntries("task"), 1);
     } finally {
@@ -154,7 +154,7 @@ describe("automated workflow", () => {
         taskResult("quick fix", "adjusted response"),
         assistant(""),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: quick fix");
     } finally {
       h.dispose();
     }

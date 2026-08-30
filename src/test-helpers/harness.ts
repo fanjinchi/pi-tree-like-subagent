@@ -128,6 +128,11 @@ export class TestHarness {
     assert.strictEqual(this.testUi.lastStatus, expected);
   }
 
+  /** Raw status value before ANSI stripping — asserts that styling was applied. */
+  get lastStatusRaw(): string | undefined {
+    return this.testUi.lastStatusRaw;
+  }
+
   assertLastNotification(expected: string | undefined): void {
     assert.strictEqual(this.testUi.lastNotification, expected);
   }

@@ -475,7 +475,7 @@ export function updateTaskStatus(
   if (pending) {
     setStatus(
       "task",
-      `${prefix}${theme.fg("dim", `pending task: ${taskTitle(pending.data.title)}`)}`,
+      `${prefix}${theme.fg("accent", `pending task: ${taskTitle(pending.data.title)}`)}`,
     );
     return;
   }
@@ -483,7 +483,7 @@ export function updateTaskStatus(
   const resume = pendingResume(session);
   if (resume) {
     const resumeTitle = resume.data.title ? `: ${taskTitle(resume.data.title)}` : "";
-    setStatus("task", `${prefix}${theme.fg("dim", `pending resume${resumeTitle}`)}`);
+    setStatus("task", `${prefix}${theme.fg("accent", `pending resume${resumeTitle}`)}`);
     return;
   }
 
@@ -491,8 +491,20 @@ export function updateTaskStatus(
   if (active) {
     setStatus(
       "task",
-      `${prefix}${theme.fg("dim", `current task: ${taskTitle(active.data.title)}`)}`,
+      `${prefix}${theme.fg("warning", `current task: ${taskTitle(active.data.title)}`)}`,
     );
+    return;
+  }
+
+  // Suspended runs are resumable (or, after a relayed task-ask, still
+  // awaiting the mainline's answer). Shown in muted so the actionable
+  // states above stay visually dominant.
+  const suspended = latestSuspendedTask(session);
+  if (suspended) {
+    const title = taskTitle(suspended.data.title);
+    const text =
+      suspended.data.reason === "ask" ? `awaiting answer: ${title}` : `suspended: ${title}`;
+    setStatus("task", `${prefix}${theme.fg("muted", text)}`);
     return;
   }
 

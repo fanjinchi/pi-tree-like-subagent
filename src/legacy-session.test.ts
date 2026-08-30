@@ -15,7 +15,7 @@ describe("legacy session compatibility", () => {
       h.assertSession(user("legacy prompt"), assistant("Done."));
 
       await h.prompt("/finish-task");
-      h.assertStatus();
+      h.assertStatus("suspended: untitled");
       h.assertSession(taskResult("untitled", "Done."), assistant("Great!"));
     } finally {
       h.dispose();

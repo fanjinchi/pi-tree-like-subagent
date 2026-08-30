@@ -234,7 +234,8 @@ const MOCK_SKILLS: Skill[] = [
   },
   {
     name: "task-review",
-    description: "Role card for review tasks queued via push-task: independent review of code or a plan, no author bias",
+    description:
+      "Role card for review tasks queued via push-task: independent review of code or a plan, no author bias",
     filePath: "/dev/null/skills/task-review/SKILL.md",
     baseDir: "/dev/null/skills/task-review",
     sourceInfo: {
@@ -247,7 +248,8 @@ const MOCK_SKILLS: Skill[] = [
   },
   {
     name: "task-research",
-    description: "Role card for research tasks queued via push-task: self-contained investigation, report is the only deliverable",
+    description:
+      "Role card for research tasks queued via push-task: self-contained investigation, report is the only deliverable",
     filePath: "/dev/null/skills/task-research/SKILL.md",
     baseDir: "/dev/null/skills/task-research",
     sourceInfo: {
@@ -260,7 +262,8 @@ const MOCK_SKILLS: Skill[] = [
   },
   {
     name: "task-implement",
-    description: "Role card for implementation tasks queued via push-task: build from the plan, report change list and verification",
+    description:
+      "Role card for implementation tasks queued via push-task: build from the plan, report change list and verification",
     filePath: "/dev/null/skills/task-implement/SKILL.md",
     baseDir: "/dev/null/skills/task-implement",
     sourceInfo: {
@@ -277,7 +280,8 @@ const MOCK_SKILLS: Skill[] = [
 // path can be tested end to end (the file content is read and inlined).
 const TASK_REVIEW_SKILL: Skill = {
   name: "task-review",
-  description: "Role card for review tasks queued via push-task: independent review of code or a plan, no author bias",
+  description:
+    "Role card for review tasks queued via push-task: independent review of code or a plan, no author bias",
   filePath: new URL("../skills/task-review/SKILL.md", import.meta.url).pathname,
   baseDir: new URL("../skills/task-review", import.meta.url).pathname,
   sourceInfo: {

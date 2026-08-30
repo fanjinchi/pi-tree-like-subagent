@@ -95,7 +95,7 @@ describe("task-ask", () => {
       assert.strictEqual(h.countBranchCustomEntries("task-resume-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-suspended"), 2);
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }
@@ -137,7 +137,7 @@ describe("task-ask", () => {
         taskQuestion("AAA", "Which database?"),
         assistant("Let me check."),
       );
-      h.assertStatus();
+      h.assertStatus("awaiting answer: AAA");
 
       await h.prompt("/resume-task The answer is SQLite.");
       h.assertSession(
@@ -158,7 +158,7 @@ describe("task-ask", () => {
         taskResult("AAA", "Done."),
         assistant("Great!"),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }
@@ -191,7 +191,7 @@ describe("task-ask", () => {
       const suspended = h.branchCustomData("task-suspended") as Array<{ reason?: string }>;
       assert.strictEqual(suspended.length, 1);
       assert.strictEqual(suspended[0].reason, "finish");
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }
@@ -211,7 +211,7 @@ describe("task-ask", () => {
 
       h.assertLastNotification("Task suspended. Resume with `/resume-task` or `/auto`.");
       // The task entry was consumed so /auto does not restart the task.
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
       const suspended = h.branchCustomData("task-suspended") as Array<{ reason?: string }>;
       assert.strictEqual(suspended.length, 1);
       assert.strictEqual(suspended[0].reason, "manual");
@@ -229,7 +229,7 @@ describe("task-ask", () => {
       await h.prompt("/finish-task");
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-suspended"), 2);
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }

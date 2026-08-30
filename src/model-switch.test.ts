@@ -54,7 +54,7 @@ describe("model switching on /start-task", () => {
         taskResult("AAA", "Done."),
         assistant("Great!"),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }
@@ -173,7 +173,7 @@ describe("model switching on /start-task", () => {
         taskResult("BBB", "inner done"),
         assistant("nice"),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: BBB");
     } finally {
       h.dispose();
     }
@@ -227,7 +227,7 @@ describe("model switching on /start-task", () => {
         taskResult("AAA", "Done."),
         assistant("Great!"),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }
@@ -271,7 +271,7 @@ describe("model switching on /start-task", () => {
         assistant("Great!"),
       );
       h.assertLastNotification("Previous model supergsd-test/deterministic no longer available.");
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }

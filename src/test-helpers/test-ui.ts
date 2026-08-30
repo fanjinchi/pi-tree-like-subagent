@@ -7,6 +7,7 @@ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 export class TestUi {
   #lastNotification: string | undefined;
   #lastStatus: string | undefined;
+  #lastStatusRaw: string | undefined;
 
   readonly context: ExtensionUIContext = {
     ...noOpContext,
@@ -15,12 +16,19 @@ export class TestUi {
     },
     setStatus: (key: string, value: string | undefined) => {
       if (key !== "task") return;
+      // Capture before normalization so tests can assert ANSI styling survived.
+      this.#lastStatusRaw = value;
       this.#lastStatus = normalizeText(value);
     },
   };
 
   get lastStatus(): string | undefined {
     return this.#lastStatus;
+  }
+
+  /** Raw status value before ANSI stripping; asserts that styling was applied. */
+  get lastStatusRaw(): string | undefined {
+    return this.#lastStatusRaw;
   }
 
   get lastNotification(): string | undefined {

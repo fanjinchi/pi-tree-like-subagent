@@ -20,7 +20,7 @@ Minimal task automation for [Pi](https://pi.dev) without subagents, using the Pi
 
 - 修复了 `/finish-task` 有时不唤醒 AI 的问题；
 - 新增上面说的 fork（从当前上下文开始任务）、resume（带消息回到旧任务分支）、task-ask（任务内向主线/用户提问）；
-- 删除了打包自 Superpowers 的 `brainstorming`、`executing-plans`、`finishing-a-development-branch`、`writing-plans`、`writing-roadmaps` 技能——我自己在用 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 做工作流，感觉不再需要 Superpowers 的 plan 流程（也不知道哪个更好，详见下文 *Differences from upstream*）。
+- 删除了打包自 Superpowers 的 `brainstorming`、`executing-plans`、`finishing-a-development-branch`、`writing-plans`、`writing-roadmaps` 技能——我自己在用 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 做工作流，感觉不再需要 Superpowers 的 plan 流程（也不知道哪个更好，详见下文 _Differences from upstream_）。
 
 **English**
 
@@ -38,7 +38,7 @@ Compared with the fork source [pi-supergsd](https://github.com/skhoroshavin/pi-s
 
 - fixed a bug where `/finish-task` sometimes failed to wake the AI;
 - added the fork / resume / task-ask features described above;
-- removed the bundled Superpowers skills `brainstorming`, `executing-plans`, `finishing-a-development-branch`, `writing-plans`, `writing-roadmaps` — I use [OpenSpec](https://github.com/Fission-AI/OpenSpec) for my workflow and no longer need Superpowers' planning flow (not sure which is better; see *Differences from upstream* below).
+- removed the bundled Superpowers skills `brainstorming`, `executing-plans`, `finishing-a-development-branch`, `writing-plans`, `writing-roadmaps` — I use [OpenSpec](https://github.com/Fission-AI/OpenSpec) for my workflow and no longer need Superpowers' planning flow (not sure which is better; see _Differences from upstream_ below).
 
 ## Install
 
@@ -81,17 +81,21 @@ Remaining skills:
 
 ## Tools and commands reference
 
-| Command                 | Action                                                                               |
-| ----------------------- | ------------------------------------------------------------------------------------ |
-| `/start-task [model]`   | Saves a checkpoint and starts the pending task in a new branch                       |
-| `/finish-task`          | Returns from task branch to saved checkpoint with the assistant response as a result |
-| `/abort-task`           | Returns from task branch to saved checkpoint without attaching any result            |
-| `/discard-task`         | Discards a pending task without executing it                                         |
-| `/resume-task [text]`   | Resumes the most recently suspended task branch (or a queued resume-task request)    |
-| `/suspend-task`         | Suspends the current task and returns to the mainline (relays a pending question)    |
-| `/auto`                 | EXPERIMENTAL! Runs pending tasks and queued resumes hands-free, relaying questions   |
+| Command               | Action                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------ |
+| `/start-task [model]` | Saves a checkpoint and starts the pending task in a new branch                       |
+| `/finish-task`        | Returns from task branch to saved checkpoint with the assistant response as a result |
+| `/abort-task`         | Returns from task branch to saved checkpoint without attaching any result            |
+| `/discard-task`       | Discards a pending task without executing it                                         |
+| `/resume-task [text]` | Resumes the most recently suspended task branch (or a queued resume-task request)    |
+| `/suspend-task`       | Suspends the current task and returns to the mainline (relays a pending question)    |
+| `/auto`               | EXPERIMENTAL! Runs pending tasks and queued resumes hands-free, relaying questions   |
 
 If `[model]` is passed to `/start-task`, the model switches before the task prompt is sent. On `/finish-task`, `/abort-task`, or `/suspend-task`, the original model is restored.
+
+### Footer status
+
+The status bar shows the current task state at a glance: `pending task: <title>` (accent, queued but not started), `pending resume: <title>` (accent, queued resume), `current task: <title>` (warning, you are inside the task branch), `awaiting answer: <title>` (muted, suspended on a task question), and `suspended: <title>` (muted, resumable with `/resume-task`). Normally it stays empty — no task state to report.
 
 ### `push-task` tool
 

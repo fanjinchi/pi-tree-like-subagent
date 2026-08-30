@@ -49,7 +49,7 @@ describe("fork tasks", () => {
         taskResult("implement", "Implemented."),
         assistant("Great!"),
       );
-      h.assertStatus();
+      h.assertStatus("suspended: implement");
       h.assertSessionContains(user("Implement plan X as discussed."), assistant("Implemented."));
     } finally {
       h.dispose();

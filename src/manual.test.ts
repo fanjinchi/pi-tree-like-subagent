@@ -56,7 +56,7 @@ describe("manual workflow", () => {
             taskResult("AAA", "Done."),
             assistant("Great!"),
           );
-          h.assertStatus();
+          h.assertStatus("suspended: AAA");
         }).children(
           node("start [no task]", async (h) => {
             await h.prompt("/start-task");
@@ -67,7 +67,7 @@ describe("manual workflow", () => {
               taskResult("AAA", "Done."),
               assistant("Great!"),
             );
-            h.assertStatus();
+            h.assertStatus("suspended: AAA");
             h.assertLastNotification("No pending task. Use push-task first.");
           }),
           node("discard [no task]", async (h) => {
@@ -79,7 +79,7 @@ describe("manual workflow", () => {
               taskResult("AAA", "Done."),
               assistant("Great!"),
             );
-            h.assertStatus();
+            h.assertStatus("suspended: AAA");
             h.assertLastNotification("No pending task to discard.");
           }),
           node("finish [no task]", async (h) => {
@@ -91,7 +91,7 @@ describe("manual workflow", () => {
               taskResult("AAA", "Done."),
               assistant("Great!"),
             );
-            h.assertStatus();
+            h.assertStatus("suspended: AAA");
             h.assertLastNotification("Not inside task, nothing to finish.");
           }),
           node("abort [no task]", async (h) => {
@@ -103,7 +103,7 @@ describe("manual workflow", () => {
               taskResult("AAA", "Done."),
               assistant("Great!"),
             );
-            h.assertStatus();
+            h.assertStatus("suspended: AAA");
             h.assertLastNotification("Not inside task, nothing to abort.");
           }),
         ),
@@ -131,7 +131,7 @@ describe("manual workflow", () => {
                 taskResult("AAA", "Done."),
                 assistant("Great!"),
               );
-              h.assertStatus();
+              h.assertStatus("suspended: AAA");
             }),
           ),
         ),
@@ -200,7 +200,7 @@ describe("manual workflow", () => {
                   taskResult("AAA", "Done."),
                   assistant("Great!"),
                 );
-                h.assertStatus();
+                h.assertStatus("suspended: AAA");
               }),
             ),
           ),

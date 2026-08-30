@@ -54,7 +54,7 @@ describe("resume-task", () => {
       // finish only records a fresh resumable point.
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-suspended"), 2);
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }
@@ -84,7 +84,7 @@ describe("resume-task", () => {
       assert.strictEqual(h.countBranchCustomEntries("task-resume"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-resume-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }
@@ -116,7 +116,7 @@ describe("resume-task", () => {
       await h.prompt("/finish-task");
       // Abort left the task entry pending; the resumed run's finish consumes it.
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
       h.assertSession(
         user("main work"),
         assistant("working...", "toolUse"),
@@ -152,7 +152,7 @@ describe("resume-task", () => {
       assert.strictEqual(h.countBranchCustomEntries("task-suspended"), 3);
       // task-start entries live on side branches, never on the mainline.
       assert.strictEqual(h.countBranchCustomEntries("task-start"), 0);
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
       h.assertSession(
         user("main work"),
         assistant("working...", "toolUse"),
@@ -274,7 +274,7 @@ describe("resume-task", () => {
 
       await h.prompt("/finish-task");
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 2);
-      h.assertStatus();
+      h.assertStatus("suspended: BBB");
     } finally {
       h.dispose();
     }
@@ -298,7 +298,7 @@ describe("resume-task", () => {
       // Consumed (so /auto would not stall) and no navigation happened.
       assert.strictEqual(h.countBranchCustomEntries("task-resume-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-start"), 0);
-      h.assertStatus();
+      h.assertStatus("suspended: AAA");
     } finally {
       h.dispose();
     }
