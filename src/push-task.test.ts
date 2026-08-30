@@ -1,6 +1,8 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   assistant,
@@ -12,9 +14,37 @@ import {
   user,
 } from "./test-helpers/index.js";
 
-import { setSkills } from "./index.js";
+import { findOwnSkillFile, setSkills } from "./index.js";
 
 import type { Skill } from "@earendil-works/pi-coding-agent";
+
+describe("findOwnSkillFile depth cap", () => {
+  it("resolves within the package (depth <= 2) and never picks up ancestor skills", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-skills-"));
+    try {
+      // startDir mirrors the source layout: <root>/pkg/src with skills/ at
+      // the package root (<root>/pkg/skills). An unrelated ancestor dir
+      // also carries a same-named skill — it must never be resolved.
+      await mkdir(join(root, "pkg", "skills", "foo"), { recursive: true });
+      await mkdir(join(root, "skills", "foo"), { recursive: true });
+      await writeFile(join(root, "pkg", "skills", "foo", "SKILL.md"), "pkg copy");
+      await writeFile(join(root, "skills", "foo", "SKILL.md"), "ancestor copy");
+
+      const startDir = join(root, "pkg", "src");
+      assert.strictEqual(
+        findOwnSkillFile("foo", startDir),
+        join(root, "pkg", "skills", "foo", "SKILL.md"),
+      );
+
+      // Without the in-package copy, the ancestor copy must stay unresolved:
+      // the cap stops the walk at the package root instead of escaping it.
+      await rm(join(root, "pkg", "skills", "foo", "SKILL.md"));
+      assert.strictEqual(findOwnSkillFile("foo", startDir), undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("push-task skill resolution", () => {
   it("leaves prompt unchanged when there are no skill refs", async () => {

@@ -1614,8 +1614,11 @@ function ownSkillByName(name: string): Skill | undefined {
  * src/index.ts) — so it never escapes the extension package and cannot pick
  * up same-named skills from ancestor directories.
  */
-function findOwnSkillFile(name: string): string | undefined {
-  let dir = dirname(fileURLToPath(import.meta.url));
+export function findOwnSkillFile(
+  name: string,
+  startDir = dirname(fileURLToPath(import.meta.url)),
+): string | undefined {
+  let dir = startDir;
   for (let depth = 0; depth < 2; depth++) {
     const candidate = join(dir, "skills", name, "SKILL.md");
     if (existsSync(candidate)) return candidate;
