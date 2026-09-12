@@ -15,15 +15,16 @@ A Pi extension implementing tree-native task automation (no subagents). Fork of 
 | ------------------- | -------------------------------------------------------------------- |
 | `task`              | Queued task (`{title, prompt, fork?}`)                               |
 | `task-start`        | A run started (`{title, returnTo, taskEntryId?, fork?, resume?}`)     |
-| `task-done`         | Consumes the nearest unconsumed `task` above it (LIFO)               |
+| `task-done`         | Consumes the queued task it names (`taskEntryId`); legacy entries without an id pop the nearest unconsumed task (pre-FIFO rule) |
 | `task-suspended`    | Resumable point (`{title, branchLeafId, reason, taskEntryId?}`)       |
 | `task-resume`       | Queued resume request (`{title?, message}`)                          |
-| `task-resume-done`  | Consumes one `task-resume` (LIFO)                                    |
+| `task-resume-done`  | Consumes the resume request it names (`resumeEntryId`); legacy entries without an id pop the newest unconsumed request (pre-FIFO rule) |
 | `task-ask`          | Pending question for the mainline (`{question}`)                     |
 
 Invariants:
 
 - Every `task` entry is consumed by exactly one `task-done`. Consumption is id-checked via `taskEntryId` (a resumed run consumes its entry iff it is still pending, e.g. after an abort).
+- Queue order is FIFO: `/start-task`, `/discard-task`, and `/auto` always act on the oldest unconsumed `task` above the latest `task-start`. Queued resume requests run oldest first too. Consumption is id-checked (`taskEntryId`/`resumeEntryId`); legacy entries without an id pop the newest unconsumed entry (pre-FIFO rule).
 - `task-suspended`/`task-ask`/`task-resume*` never participate in `pendingTask` accounting.
 - When leaving a branch, `returnTo` must be captured **after** appending all bookkeeping entries meant for the departure branch — otherwise the return navigation orphans them.
 - `navigateTree` is only available on command context; never call it from event handlers.

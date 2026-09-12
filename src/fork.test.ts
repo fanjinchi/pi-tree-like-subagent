@@ -80,7 +80,7 @@ describe("fork tasks", () => {
     try {
       await h.prompt("work");
       h.assertLastNotification(
-        "Task stored (forks the current context). Use `/start-task` or `/auto` to start it.",
+        "Task stored (forks the current context). Start it with `/start-task` or `/auto`.",
       );
     } finally {
       h.dispose();

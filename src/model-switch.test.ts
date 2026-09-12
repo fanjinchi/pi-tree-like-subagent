@@ -197,20 +197,20 @@ describe("model switching on /start-task", () => {
       await h.prompt("main work");
       await h.prompt("more work");
 
-      // LIFO: BBB starts first, with model-b
+      // FIFO: AAA starts first, with model-b
       await h.prompt("/start-task model-b");
       h.assertModel("supergsd-test/model-b");
-      h.assertSession(user("other prompt"), assistant("inner done"));
+      h.assertSession(user("some prompt"), assistant("Done."));
 
       // Finish — restores deterministic
       await h.prompt("/finish-task");
       h.assertModel("supergsd-test/deterministic");
-      h.assertStatus("pending task: AAA");
+      h.assertStatus("pending task: BBB");
 
-      // AAA starts with model-a
+      // BBB starts with model-a
       await h.prompt("/start-task model-a");
       h.assertModel("supergsd-test/model-a");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(user("other prompt"), assistant("inner done"));
 
       // Finish — restores deterministic again
       await h.prompt("/finish-task");
@@ -222,12 +222,12 @@ describe("model switching on /start-task", () => {
         user("more work"),
         assistant("okay", "toolUse"),
         task("BBB", "other prompt"),
-        taskResult("BBB", "inner done"),
-        assistant("nice"),
         taskResult("AAA", "Done."),
         assistant("Great!"),
+        taskResult("BBB", "inner done"),
+        assistant("nice"),
       );
-      h.assertStatus("suspended: AAA");
+      h.assertStatus("suspended: BBB");
     } finally {
       h.dispose();
     }

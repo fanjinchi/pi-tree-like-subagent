@@ -229,6 +229,14 @@ export class TestHarness {
       .length;
   }
 
+  /** Entry ids of the custom entries of the given type on the current branch. */
+  branchCustomEntryIds(customType: string): string[] {
+    return this.sessionManager
+      .getBranch()
+      .filter((entry) => isCustomType(entry, customType))
+      .map((entry) => entry.id);
+  }
+
   /** Count custom entries of the given type across the whole session tree. */
   countAllCustomEntries(customType: string): number {
     return this.sessionManager.getEntries().filter((entry) => isCustomType(entry, customType))

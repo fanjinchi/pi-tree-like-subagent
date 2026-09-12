@@ -76,7 +76,7 @@ describe("push-task skill resolution", () => {
           "Review using /dev/null/skills/brainstorming/SKILL.md for ideas.",
         ),
       );
-      h.assertLastNotification("Task stored. Use `/start-task` or `/auto` to start it.");
+      h.assertLastNotification("Task stored. Start it with `/start-task` or `/auto`.");
     } finally {
       h.dispose();
     }
@@ -141,7 +141,7 @@ describe("push-task skill resolution", () => {
         ),
       );
       h.assertLastNotification(
-        "Warning: /skill:nonexistent were not resolved.\nTask stored. Use `/start-task` or `/auto` to start it.",
+        "Warning: /skill:nonexistent were not resolved.\nTask stored. Start it with `/start-task` or `/auto`.",
       );
     } finally {
       h.dispose();
@@ -157,7 +157,7 @@ describe("push-task skill resolution", () => {
 
       h.assertSessionContains(task("all unknown", "Use /skill:foo and /skill:bar."));
       h.assertLastNotification(
-        "Warning: /skill:foo, /skill:bar were not resolved.\nTask stored. Use `/start-task` or `/auto` to start it.",
+        "Warning: /skill:foo, /skill:bar were not resolved.\nTask stored. Start it with `/start-task` or `/auto`.",
       );
     } finally {
       h.dispose();
@@ -241,7 +241,7 @@ describe("push-task skill resolution", () => {
 
       h.assertSessionContains(task("no skills at all", "Use /skill:zzz-no-such-skill."));
       h.assertLastNotification(
-        "Warning: /skill:zzz-no-such-skill were not resolved.\nTask stored. Use `/start-task` or `/auto` to start it.",
+        "Warning: /skill:zzz-no-such-skill were not resolved.\nTask stored. Start it with `/start-task` or `/auto`.",
       );
     } finally {
       h.dispose();

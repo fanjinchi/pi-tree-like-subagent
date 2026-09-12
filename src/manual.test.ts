@@ -147,9 +147,9 @@ describe("manual workflow", () => {
           assistant("okay", "toolUse"),
           task("BBB", "other prompt"),
         );
-        h.assertStatus("pending task: BBB");
+        h.assertStatus("pending task: AAA (+1 queued)");
       }).children(
-        node("discard BBB", async (h) => {
+        node("discard AAA (queue head)", async (h) => {
           await h.prompt("/discard-task");
           h.assertSession(
             user("main work"),
@@ -159,15 +159,15 @@ describe("manual workflow", () => {
             assistant("okay", "toolUse"),
             task("BBB", "other prompt"),
           );
-          h.assertStatus("pending task: AAA");
+          h.assertStatus("pending task: BBB");
           h.assertLastNotification("Task discarded.");
         }),
-        node("start BBB first (LIFO)", async (h) => {
+        node("start AAA first (FIFO)", async (h) => {
           await h.prompt("/start-task");
-          h.assertSession(user("other prompt"), assistant("inner done"));
-          h.assertStatus("current task: BBB");
+          h.assertSession(user("some prompt"), assistant("Done."));
+          h.assertStatus("current task: AAA");
         }).children(
-          node("finish BBB", async (h) => {
+          node("finish AAA", async (h) => {
             await h.prompt("/finish-task");
             h.assertSession(
               user("main work"),
@@ -176,17 +176,17 @@ describe("manual workflow", () => {
               user("more work"),
               assistant("okay", "toolUse"),
               task("BBB", "other prompt"),
-              taskResult("BBB", "inner done"),
+              taskResult("AAA", "Done."),
               assistant("Great!"),
             );
-            h.assertStatus("pending task: AAA");
+            h.assertStatus("pending task: BBB");
           }).children(
-            node("start AAA", async (h) => {
+            node("start BBB", async (h) => {
               await h.prompt("/start-task");
-              h.assertSession(user("some prompt"), assistant("Done."));
-              h.assertStatus("current task: AAA");
+              h.assertSession(user("other prompt"), assistant("inner done"));
+              h.assertStatus("current task: BBB");
             }).children(
-              node("finish AAA", async (h) => {
+              node("finish BBB", async (h) => {
                 await h.prompt("/finish-task");
                 h.assertSession(
                   user("main work"),
@@ -195,12 +195,12 @@ describe("manual workflow", () => {
                   user("more work"),
                   assistant("okay", "toolUse"),
                   task("BBB", "other prompt"),
-                  taskResult("BBB", "inner done"),
-                  assistant("Great!"),
                   taskResult("AAA", "Done."),
                   assistant("Great!"),
+                  taskResult("BBB", "inner done"),
+                  assistant("Great!"),
                 );
-                h.assertStatus("suspended: AAA");
+                h.assertStatus("suspended: BBB");
               }),
             ),
           ),
@@ -238,7 +238,7 @@ describe("manual workflow", () => {
         { role: "assistant", text: "working...", stopReason: "toolUse" },
         {
           role: "toolResult",
-          text: "Task stored. Use `/start-task` or `/auto` to start it.",
+          text: "Task stored. Start it with `/start-task` or `/auto`.",
         },
         { role: "assistant", text: "", stopReason: "aborted" },
         { role: "user", text: "[task-result: AAA]\n\nDone." },
@@ -272,7 +272,7 @@ describe("manual workflow", () => {
         { role: "assistant", text: "working...", stopReason: "toolUse" },
         {
           role: "toolResult",
-          text: "Task stored. Use `/start-task` or `/auto` to start it.",
+          text: "Task stored. Start it with `/start-task` or `/auto`.",
         },
         { role: "user", text: "[task-result: AAA]\n\nDone." },
       ]);

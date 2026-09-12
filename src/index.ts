@@ -33,17 +33,18 @@ export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
   return defineTool({
     name: "push-task",
     label: "Push Task",
-    description: "Store a task prompt for a user-started navigation branch.",
-    promptSnippet: "Store a focused task prompt for a user-started navigation branch.",
+    description:
+      "Hand off a self-contained chunk of work (research, review, implementation, or a mechanical multi-file edit) to an isolated task branch; it runs later as its own agent turn, keeping this conversation clean.",
+    promptSnippet:
+      "Hand off work to an isolated task branch (research, review, implement, bulk edits).",
     promptGuidelines: [
-      "Use push-task to hand off a self-contained chunk of work for isolated execution. It only queues a task - nothing runs until the user starts it (/start-task or /auto). Queue only when deferral or isolation is genuinely useful; otherwise just do the work inline.",
-      "Split work into tasks - one goal per task: a task is a single outcome the user can start, review, and accept or reject on its own. Split chained stages into separate tasks (e.g. implement, then review); don't stuff all stages into one prompt. Merge small independent fixes of the same kind into one task; don't flood the queue.",
-      "Pick a role per task and reference it in the prompt: review - fresh-context review of code or a plan (avoids author bias), reports findings with file:line and a verdict, reference /skill:task-review; research - self-contained investigation, returns a report as its only deliverable, reference /skill:task-research; implement - build from the plan just discussed, reports the change list, verification, and deviations, reference /skill:task-implement. The context mode (fork or fresh) is decided by the next rule.",
-      "Decide the context mode per task: fork: true inherits the current discussion (the branch reads all of it); omit it for a clean context, and the prompt must then be self-contained. By role: implement forks by default, but prefer fresh with the plan captured in the prompt when the mainline context is long and noisy; review stays fresh by default (its target is on disk), but fork when the review target exists only in this discussion; research is always fresh.",
-      "Use it when: the work would flood the mainline with search results, logs, or file contents you will not reference again; a fresh perspective helps (e.g. reviewing your own recent changes); the task spans many steps across multiple files with heavy tool output and the mainline only needs the final outcome; you just discussed an implementation plan (queue with fork: true so the branch inherits this context).",
-      "Do NOT use it for: quick work finishable in a few steps (the branch round-trip costs more than it saves); work that needs continuous back-and-forth with the mainline discussion; open-ended exploration or prototyping where speed matters more than isolation.",
-      "Do not batch multiple push-task calls together, and do not mix push-task with other tool calls in the same turn.",
-      "push-task notifies the user itself; do not write any further text in the same turn after calling it.",
+      "push-task is the default way to handle any request that is not a single-step answer: hand the work off and keep this conversation for planning, decisions, and the user's own questions. Do the work inline only when it is a quick one- or two-tool-call change, or when it needs live back-and-forth with this conversation.",
+      "Queue a task as soon as any of these is observable: the request touches two or more files; it needs builds, tests, logs, or large files you will not reference again; it needs an independent review (no author bias); it produces a report you will not re-read; the user just approved a plan and expects it executed. These are facts about the request - when one is true, queue the task.",
+      'Choose role and context in the same breath: review - fresh context, reference /skill:task-review (fork: true only when the target exists nowhere but this discussion); research - always fresh with every input restated in the prompt, reference /skill:task-research; implement - fork: true when the plan is already in this discussion, fresh with the plan restated when this conversation is long and noisy; reference /skill:task-implement. A fresh prompt must be self-contained; a fork prompt may say "the plan above".',
+      "Queue independent tasks together in one turn - their order does not matter. Queue dependent stages one per turn, after the previous stage's result arrived: the queue runs in call order (oldest first) and the completion order of parallel tool calls is not deterministic.",
+      "Do not queue work whose next step depends on what you just saw in this conversation (open-ended exploration, prototyping, interactive debugging). That exemption is narrow: a large mechanical edit, a wide search, or a self-contained investigation is a task even when it feels quick to start.",
+      "One task = one outcome the user can review and accept on its own: split chained stages (implement, then review) into separate entries, merge small same-kind fixes into one. A queue of three to five stages is normal.",
+      "push-task ends the turn and notifies the user itself; the tool result is the receipt (it reports the queue position), so one short line before the call is enough - no text after it, and never start the same work inline.",
     ],
     parameters: pushTaskParameters,
     renderCall(args: PushTaskParams, theme, context) {
@@ -80,9 +81,12 @@ export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
           : {}),
       });
 
-      const storedMessage = fork
-        ? "Task stored (forks the current context). Use `/start-task` or `/auto` to start it."
-        : "Task stored. Use `/start-task` or `/auto` to start it.";
+      const queuedCount = pendingTasks(ctx.sessionManager).length;
+      const storedPrefix = fork ? "Task stored (forks the current context). " : "Task stored. ";
+      const storedMessage =
+        queuedCount > 1
+          ? `${storedPrefix}${queuedCount} tasks queued - \`/start-task\` or \`/auto\` runs them oldest first.`
+          : `${storedPrefix}Start it with \`/start-task\` or \`/auto\`.`;
 
       if (ctx.hasUI) {
         refreshTaskStatus(ctx);
@@ -497,12 +501,11 @@ export function updateTaskStatus(
   options: TaskStatusOptions = {},
 ): void {
   const prefix = options.prefix ?? "";
-  const pending = pendingTask(session);
-  if (pending) {
-    setStatus(
-      "task",
-      `${prefix}${theme.fg("accent", `pending task: ${taskTitle(pending.data.title)}`)}`,
-    );
+  const pending = pendingTasks(session);
+  if (pending.length > 0) {
+    const title = taskTitle(pending[0].data.title);
+    const queued = pending.length > 1 ? ` (+${pending.length - 1} queued)` : "";
+    setStatus("task", `${prefix}${theme.fg("accent", `pending task: ${title}${queued}`)}`);
     return;
   }
 
@@ -815,7 +818,7 @@ async function discardTask(
     return;
   }
 
-  pi.appendEntry(TASK_DONE_ENTRY_TYPE, {});
+  pi.appendEntry(TASK_DONE_ENTRY_TYPE, { taskEntryId: activeTask.id });
   ctx.ui.notify("Task discarded.", "info");
 
   refreshTaskStatus(ctx);
@@ -879,7 +882,9 @@ async function finishTask(
   }
 
   if (shouldConsumeTaskEntry(ctx.sessionManager, taskStart)) {
-    pi.appendEntry(TASK_DONE_ENTRY_TYPE, {});
+    pi.appendEntry(TASK_DONE_ENTRY_TYPE, {
+      ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+    });
   }
   pi.appendEntry(TASK_SUSPENDED_ENTRY_TYPE, {
     title,
@@ -979,7 +984,7 @@ async function resumeTask(
       if (!suspended) {
         // Injecting a task-specific message into an unrelated branch is worse
         // than dropping the request; consume it so /auto does not stall on it.
-        pi.appendEntry(TASK_RESUME_DONE_ENTRY_TYPE, {});
+        pi.appendEntry(TASK_RESUME_DONE_ENTRY_TYPE, { resumeEntryId: request.id });
         ctx.ui.notify(
           `Resume request discarded: no suspended task titled "${request.data.title}".`,
           "warning",
@@ -1002,7 +1007,7 @@ async function resumeTask(
   if (!suspended) {
     if (request) {
       // Consume the request that can never execute so /auto does not stall.
-      pi.appendEntry(TASK_RESUME_DONE_ENTRY_TYPE, {});
+      pi.appendEntry(TASK_RESUME_DONE_ENTRY_TYPE, { resumeEntryId: request.id });
       ctx.ui.notify("Resume request discarded: no resumable task on this branch.", "warning");
       refreshTaskStatus(ctx, { prefix: options.statusPrefix });
       return "error";
@@ -1023,7 +1028,7 @@ async function resumeTask(
   // contain the task-resume-done entry, otherwise navigating back at finish
   // would orphan it on a side branch and /auto would re-execute the request.
   if (request) {
-    pi.appendEntry(TASK_RESUME_DONE_ENTRY_TYPE, {});
+    pi.appendEntry(TASK_RESUME_DONE_ENTRY_TYPE, { resumeEntryId: request.id });
   }
   const departureLeafId = ctx.sessionManager.getLeafId()!;
 
@@ -1101,7 +1106,9 @@ async function suspendTask(
   syncTaskToolVisibility(pi, ctx.sessionManager);
 
   if (shouldConsumeTaskEntry(ctx.sessionManager, taskStart)) {
-    pi.appendEntry(TASK_DONE_ENTRY_TYPE, {});
+    pi.appendEntry(TASK_DONE_ENTRY_TYPE, {
+      ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+    });
   }
   pi.appendEntry(TASK_SUSPENDED_ENTRY_TYPE, {
     title,
@@ -1225,30 +1232,46 @@ function findPreConversationEntry(session: ReadonlySessionLike): SessionEntry | 
   return null;
 }
 
-/** Latest unconsumed resume request, or null inside a task branch. */
+/** Oldest unconsumed resume request (FIFO), or null inside a task branch. */
 function pendingResume(session: ReadonlySessionLike): TaskResumeEntry | null {
-  const branch = session.getBranch();
-  let skip = 0;
+  const stack: TaskResumeEntry[] = [];
 
-  for (let i = branch.length - 1; i >= 0; i--) {
-    const entry = branch[i];
+  for (const entry of session.getBranch()) {
     if (entry.type === "custom" && entry.customType === TASK_START_ENTRY_TYPE) {
-      return null;
+      // Inside a task branch the queue below it does not belong to the run.
+      stack.length = 0;
+      continue;
     }
     if (entry.type === "custom" && entry.customType === TASK_RESUME_DONE_ENTRY_TYPE) {
-      skip++;
+      // A done with an id removes exactly the request it names; a legacy done
+      // without one consumes the newest request (the pre-FIFO LIFO rule).
+      const id = taskResumeDoneEntryId(entry);
+      if (id === undefined) {
+        stack.pop();
+        continue;
+      }
+      const index = stack.findIndex((request) => request.id === id);
+      if (index !== -1) stack.splice(index, 1);
       continue;
     }
     if (isTaskResumeEntry(entry)) {
-      if (skip === 0) return entry;
-      skip--;
+      stack.push(entry);
     }
   }
 
-  return null;
+  return stack[0] ?? null;
 }
 
 const TASK_RESUME_DONE_ENTRY_TYPE = "task-resume-done";
+
+/** Id recorded by a task-resume-done, or undefined for legacy entries without one. */
+function taskResumeDoneEntryId(entry: SessionEntry): string | undefined {
+  if (entry.type !== "custom" || entry.customType !== TASK_RESUME_DONE_ENTRY_TYPE) {
+    return undefined;
+  }
+  const data: unknown = entry.data;
+  return isRecord(data) && typeof data.resumeEntryId === "string" ? data.resumeEntryId : undefined;
+}
 
 function latestSuspendedTask(session: ReadonlySessionLike): TaskSuspendedEntry | null {
   return findLastEntry(session, isTaskSuspendedEntry) ?? null;
@@ -1257,8 +1280,8 @@ function latestSuspendedTask(session: ReadonlySessionLike): TaskSuspendedEntry |
 /**
  * Whether finishing/suspending this run must consume its queued task entry.
  * The entry id recorded at start (carried through resume via task-suspended)
- * is checked against the LIFO accounting, so a resumed run consumes its task
- * entry exactly when it is still pending (e.g. after an abort) and never
+ * is checked against the FIFO queue accounting, so a resumed run consumes its
+ * task entry exactly when it is still pending (e.g. after an abort) and never
  * consumes an unrelated earlier task. Legacy task-start entries without an
  * id fall back to the pre-resume rule.
  */
@@ -1271,51 +1294,55 @@ function shouldConsumeTaskEntry(session: ReadonlySessionLike, taskStart: TaskSta
 
 // ── Lookup utilities ──────────────────────────────────────────────
 
-function pendingTask(session: ReadonlySessionLike): TaskEntry | null {
-  const branch = session.getBranch();
-  let skip = 0;
+/**
+ * Unconsumed tasks on this branch, enqueue order (oldest first). Forward scan
+ * with a stack: a task-start clears the stack (inside a branch only the
+ * current task counts), a task pushes, and a task-done removes the entry it
+ * names (`taskEntryId`) - or, for legacy entries without an id, pops the
+ * nearest unconsumed task (the pre-FIFO rule). The stack bottom is the queue
+ * head: the next task /start-task, /discard-task, and /auto act on.
+ */
+function pendingTasks(session: ReadonlySessionLike): TaskEntry[] {
+  const stack: TaskEntry[] = [];
 
-  for (let i = branch.length - 1; i >= 0; i--) {
-    const entry = branch[i];
+  for (const entry of session.getBranch()) {
     if (entry.type === "custom" && entry.customType === TASK_START_ENTRY_TYPE) {
-      return null;
+      stack.length = 0;
+      continue;
     }
     if (entry.type === "custom" && entry.customType === TASK_DONE_ENTRY_TYPE) {
-      skip++;
+      const id = taskDoneEntryId(entry);
+      if (id === undefined) {
+        stack.pop();
+        continue;
+      }
+      const index = stack.findIndex((task) => task.id === id);
+      if (index !== -1) stack.splice(index, 1);
       continue;
     }
     if (isTaskEntry(entry)) {
-      if (skip === 0) return entry;
-      skip--;
+      stack.push(entry);
     }
   }
 
-  return null;
+  return stack;
 }
 
-/**
- * Whether the queued task entry is still unconsumed. Mirrors pendingTask's
- * LIFO accounting: a task-done consumes the nearest unconsumed task entry
- * above it, so walking upward with a skip counter, the entry is pending iff
- * it is reached with skip === 0. (Plain done/task counting misjudges once
- * other queued tasks sit below the entry: their task entries offset the
- * consuming done, and the extra done then silently eats the newer task.)
- */
+/** Queue head: the task /start-task, /discard-task, and /auto act on. */
+function pendingTask(session: ReadonlySessionLike): TaskEntry | null {
+  return pendingTasks(session)[0] ?? null;
+}
+
+/** Id recorded by a task-done, or undefined for legacy entries without one. */
+function taskDoneEntryId(entry: SessionEntry): string | undefined {
+  if (entry.type !== "custom" || entry.customType !== TASK_DONE_ENTRY_TYPE) return undefined;
+  const data: unknown = entry.data;
+  return isRecord(data) && typeof data.taskEntryId === "string" ? data.taskEntryId : undefined;
+}
+
+/** Whether the queued task entry is still unconsumed (id-based queue accounting). */
 function taskEntryPending(session: ReadonlySessionLike, taskEntryId: string): boolean {
-  const branch = session.getBranch();
-  let skip = 0;
-  for (let i = branch.length - 1; i >= 0; i--) {
-    const entry = branch[i];
-    if (entry.id === taskEntryId) return skip === 0;
-    if (entry.type === "custom" && entry.customType === TASK_DONE_ENTRY_TYPE) {
-      skip++;
-      continue;
-    }
-    if (isTaskEntry(entry) && skip > 0) {
-      skip--;
-    }
-  }
-  return false;
+  return pendingTasks(session).some((task) => task.id === taskEntryId);
 }
 
 const TASK_DONE_ENTRY_TYPE = "task-done";

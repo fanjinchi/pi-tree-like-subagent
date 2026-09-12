@@ -59,7 +59,7 @@ describe("AgentSession-backed TestHarness foundation", () => {
       task("subtask", "some prompt"),
     );
     h.assertStatus("pending task: subtask");
-    h.assertLastNotification("Task stored. Use `/start-task` or `/auto` to start it.");
+    h.assertLastNotification("Task stored. Start it with `/start-task` or `/auto`.");
   });
 
   it("fails when the faux provider receives an unmatched prompt", async (t) => {
@@ -106,7 +106,7 @@ describe("AgentSession-backed TestHarness foundation", () => {
       task("analyse x", "Analysis details"),
     );
     h.assertStatus("pending task: analyse x");
-    h.assertLastNotification("Task stored. Use `/start-task` or `/auto` to start it.");
+    h.assertLastNotification("Task stored. Start it with `/start-task` or `/auto`.");
   });
 
   it("assertSessionContains still scans durable whole-session entries across branches", async (t) => {

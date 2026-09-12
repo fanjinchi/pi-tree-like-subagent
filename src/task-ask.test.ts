@@ -51,10 +51,10 @@ describe("task-ask", () => {
       pushTask("AAA", "prompt aaa"),
       pushTask("BBB", "prompt bbb"),
     );
-    // LIFO: BBB starts first.
-    h.llm.onPrompt("prompt bbb", responds("bbb done"));
-    h.llm.onPrompt("[task-result: BBB]\n\nbbb done", responds("noted"));
+    // FIFO: AAA starts first.
     h.llm.onPrompt("prompt aaa", responds("aaa done"));
+    h.llm.onPrompt("[task-result: AAA]\n\naaa done", responds("noted"));
+    h.llm.onPrompt("prompt bbb", responds("bbb done"));
 
     try {
       await h.prompt("main work");

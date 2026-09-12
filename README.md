@@ -85,24 +85,26 @@ Remaining skills:
 | --------------------- | --------------------------------------------------------------------------------------- |
 | `/start-task [model]` | Saves a checkpoint and starts the pending task in a new branch                          |
 | `/finish-task`        | Returns from task branch to saved checkpoint with the assistant response as a result    |
-| `/abort-task`         | Returns from task branch to saved checkpoint without attaching any result               |
+| `/abort-task`         | Returns from task branch to saved checkpoint without attaching any result (the queue head stays pending — re-run `/auto` to retry it, or `/discard-task` to drop it) |
 | `/discard-task`       | Discards a pending task without executing it                                            |
 | `/resume-task [text]` | Resumes the most recently suspended task branch (or a queued resume-task request)       |
 | `/suspend-task`       | Suspends the current task and returns to the mainline (relays a pending question)       |
 | `/auto`               | EXPERIMENTAL! Runs pending tasks and queued resumes hands-free, relaying questions      |
 | `/auto-stop`          | Stops the running `/auto` loop at the next step boundary (current task stays resumable) |
 
-`/auto` runs as a foreground loop: type `/auto-stop` (works even while the loop is waiting) to end it gracefully after the current step — the running task is left suspended/current and can be resumed with `/resume-task` or by re-running `/auto`. Esc meanwhile interrupts the currently streaming agent turn, which also ends the loop.
+`/auto` runs as a foreground loop: type `/auto-stop` (works even while the loop is waiting) to end it gracefully after the current step — the running task is left suspended/current and can be resumed with `/resume-task` or by re-running `/auto`. Esc meanwhile interrupts the currently streaming agent turn, which also ends the loop. When both kinds of work are queued, `/auto` finishes the task queue first and only then runs queued resume requests.
 
 If `[model]` is passed to `/start-task`, the model switches before the task prompt is sent. On `/finish-task`, `/abort-task`, or `/suspend-task`, the original model is restored.
 
 ### Footer status
 
-The status bar shows the current task state at a glance: `pending task: <title>` (accent, queued but not started), `pending resume: <title>` (accent, queued resume), `current task: <title>` (warning, you are inside the task branch), `awaiting answer: <title>` (muted, suspended on a task question), and `suspended: <title>` (muted, resumable with `/resume-task`). Normally it stays empty — no task state to report.
+The status bar shows the current task state at a glance: `pending task: <title>` (accent, queued but not started; a deeper queue appends the count: `pending task: <title> (+N queued)`), `pending resume: <title>` (accent, queued resume), `current task: <title>` (warning, you are inside the task branch), `awaiting answer: <title>` (muted, suspended on a task question), and `suspended: <title>` (muted, resumable with `/resume-task`). Normally it stays empty — no task state to report.
 
 ### `push-task` tool
 
 Queues a task with `title` and `prompt`. By default tasks start from fresh context. The task sits pending — nothing runs until you start it.
+
+Tasks queue in enqueue order (oldest first): `/start-task`, `/discard-task`, and `/auto` always act on the queue head, so the first task you push is the first to run — even if you push more before starting it. Queue independent tasks together in one turn; queue dependent stages one per turn, after the previous stage's result arrived. The tool result is the receipt — it reports the queue position, e.g. `Task stored. 3 tasks queued - /start-task or /auto runs them oldest first.` — and `push-task` ends the turn and notifies the user itself.
 
 With `fork: true` the task starts **from the current context** instead: `/start-task` does not navigate away, it forks a branch right at the current leaf. Use this for implementation tasks whose prompt depends on the discussion you just had — the fork prompt may reference the current conversation ("the plan above") instead of repeating it. Fresh-task prompts must stay fully self-contained.
 
@@ -135,7 +137,7 @@ LLM:     [calls push-task({ title: "Review implementation", prompt: "Review the 
          against the plan. Check correctness, edge cases,
          and test coverage."})]
 
-LLM:     Task stored. Run /start-task to review.
+LLM:     Task stored. Start it with /start-task or /auto.
 
 You:     /start-task
 
@@ -210,7 +212,7 @@ If the mainline AI can't answer either, it asks you (with a user-question plugin
 
 ### Batch implementation with /auto
 
-You prepared a detailed multi-phase plan for implementing a feature, and run it hands-free.
+You prepared a detailed multi-phase plan for implementing a feature, and run it hands-free. Each stage is pushed only after the previous one's report arrived; the queue itself runs in enqueue order (oldest first).
 
 ```
 LLM:     Roadmap has 3 phases. Let me queue phase 1.
