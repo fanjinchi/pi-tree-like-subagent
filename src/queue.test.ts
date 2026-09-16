@@ -102,6 +102,7 @@ describe("task queue (FIFO)", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       // The first queued request was consumed and reported first.
       h.assertSession(
@@ -156,6 +157,7 @@ describe("task queue (FIFO)", () => {
       h.appendCustomEntry("task-resume-done", {});
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       // "First revision." was not consumed, so it was still the queue head.
       h.assertSession(
@@ -202,6 +204,7 @@ describe("task queue (FIFO)", () => {
       h.appendCustomEntry("task-resume-done", { resumeEntryId: secondId });
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(
         user("main work"),

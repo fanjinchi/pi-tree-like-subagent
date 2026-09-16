@@ -80,6 +80,7 @@ describe("task-ask", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(
         user("main work"),
@@ -95,7 +96,7 @@ describe("task-ask", () => {
       assert.strictEqual(h.countBranchCustomEntries("task-resume-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-suspended"), 2);
-      h.assertStatus("suspended: AAA");
+      h.assertStatus("[auto] suspended: AAA");
     } finally {
       h.dispose();
     }
@@ -180,6 +181,7 @@ describe("task-ask", () => {
       await h.prompt("SQLite.");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
       // auto finishes the task instead of suspending it.
       h.assertSession(
         user("main work"),
@@ -191,7 +193,7 @@ describe("task-ask", () => {
       const suspended = h.branchCustomData("task-suspended") as Array<{ reason?: string }>;
       assert.strictEqual(suspended.length, 1);
       assert.strictEqual(suspended[0].reason, "finish");
-      h.assertStatus("suspended: AAA");
+      h.assertStatus("[auto] suspended: AAA");
     } finally {
       h.dispose();
     }

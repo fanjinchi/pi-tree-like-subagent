@@ -83,8 +83,11 @@ export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
 
       const queuedCount = pendingTasks(ctx.sessionManager).length;
       const storedPrefix = fork ? "Task stored (forks the current context). " : "Task stored. ";
-      const storedMessage =
-        queuedCount > 1
+      const storedMessage = isAutoActive(ctx.sessionManager)
+        ? queuedCount > 1
+          ? `${storedPrefix}${queuedCount} tasks queued - auto mode is on, they run and finish automatically.`
+          : `${storedPrefix}Auto mode is on - the task runs and finishes automatically.`
+        : queuedCount > 1
           ? `${storedPrefix}${queuedCount} tasks queued - \`/start-task\` or \`/auto\` runs them oldest first.`
           : `${storedPrefix}Start it with \`/start-task\` or \`/auto\`.`;
 
@@ -125,7 +128,7 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
     promptSnippet: "Queue a resume of a suspended task branch with a message.",
     promptGuidelines: [
       "Use resume-task to send follow-up input (review findings, answers, corrections) into a task branch that finished, aborted, or was suspended.",
-      "resume-task queues the resume; it takes effect when the user runs /resume-task or /auto.",
+      "resume-task queues the resume; while auto mode is on it executes automatically, otherwise it takes effect when the user runs /resume-task or /auto.",
       "resume-task notifies the user itself; do not write any further text in the same turn after calling it.",
       "Do not batch multiple resume-task calls together, and do not mix resume-task with other tool calls in the same turn.",
     ],
@@ -156,16 +159,25 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
         message: params.message,
       });
 
+      const resumeQueuedMessage = isAutoActive(ctx.sessionManager)
+        ? "Resume queued. Auto mode is on - it executes automatically."
+        : "Resume queued. It takes effect via `/resume-task` or `/auto`.";
+
       if (ctx.hasUI) {
         refreshTaskStatus(ctx);
-        ctx.ui.notify("Resume queued. Run `/resume-task` or `/auto` to execute it.", "info");
+        ctx.ui.notify(
+          isAutoActive(ctx.sessionManager)
+            ? resumeQueuedMessage
+            : "Resume queued. Run `/resume-task` or `/auto` to execute it.",
+          "info",
+        );
       }
 
       return {
         content: [
           {
             type: "text",
-            text: "Resume queued. It takes effect via `/resume-task` or `/auto`.",
+            text: resumeQueuedMessage,
           },
         ],
         details: {
@@ -187,7 +199,7 @@ export function toolTaskAsk(pi: TaskAskAPI): ToolDefinition {
     promptSnippet: "Ask the mainline orchestrator a question from inside a task branch.",
     promptGuidelines: [
       "Use task-ask only inside a task branch when you need information or a decision from the mainline orchestrator to continue the task.",
-      "After calling task-ask, stop working and wait: the question is recorded and relayed to the mainline (automatically under /auto, or when the user runs /suspend-task); the answer arrives as a resume message. Do not call other tools alongside task-ask.",
+      "After calling task-ask, stop working and wait: the question is recorded and relayed to the mainline (automatically while auto mode is on, or when the user runs /suspend-task); the answer arrives as a resume message. Do not call other tools alongside task-ask.",
       "If the question needs a human answer and a user-question tool (such as ask_user_question) is available, prefer it over relaying through the mainline - it works inside task branches and resumes your turn directly.",
       "task-ask is not for the final report - the last assistant message of a task is its report.",
     ],
@@ -212,7 +224,7 @@ export function toolTaskAsk(pi: TaskAskAPI): ToolDefinition {
 
       if (ctx.hasUI) {
         ctx.ui.notify(
-          "Task question recorded. The task suspends automatically under /auto; otherwise run /suspend-task to relay it, or answer it directly in this branch.",
+          "Task question recorded. While auto mode is on the task suspends automatically; otherwise run /suspend-task to relay it, or answer it directly in this branch.",
           "info",
         );
       }
@@ -221,7 +233,7 @@ export function toolTaskAsk(pi: TaskAskAPI): ToolDefinition {
         content: [
           {
             type: "text",
-            text: "Question recorded; the task is now waiting for an answer. Under /auto the task suspends and the question is relayed to the mainline orchestrator automatically; otherwise the user may relay it with /suspend-task or answer directly in this branch. The answer arrives as a resume message. Stop working until the answer arrives.",
+            text: "Question recorded; the task is now waiting for an answer. While auto mode is on the task suspends and the question is relayed to the mainline orchestrator automatically; otherwise the user may relay it with /suspend-task or answer directly in this branch. The answer arrives as a resume message. Stop working until the answer arrives.",
           },
         ],
         details: { question: params.question },
@@ -299,9 +311,13 @@ export function cmdSuspendTask(pi: TaskCommandAPI): CommandOptions {
 }
 
 export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
-  let running = false;
   let stopCurrentRun: (() => void) | null = null;
+  let wakeParkedLoop: (() => void) | null = null;
   let agentStartWaiter: AgentStartWaiter | null = null;
+  // Total agent_end events observed. The loop snapshots it at the park
+  // point, so a run that ended during the drain cannot be lost by parking
+  // anyway: the snapshot comparison makes the loop re-check instead.
+  let agentEndCount = 0;
 
   const settleAgentStartWaiter = (started: boolean): void => {
     const waiter = agentStartWaiter;
@@ -332,128 +348,167 @@ export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
     }
   });
 
+  // Wake the parked loop after every agent run: pushes, finishes, resumes,
+  // and manual prompts all end in agent_end (the last event emitted for a
+  // run), which is the safe point to re-check task state. The handler only
+  // resolves the park promise — navigation stays inside the command loop
+  // (navigateTree is command-context-only).
+  pi.on("agent_end", () => {
+    agentEndCount += 1;
+    wakeParkedLoop?.();
+  });
+
   pi.on("session_shutdown", async () => {
     stopCurrentRun?.();
     settleAgentStartWaiter(false);
   });
 
   return {
-    description: "Automatically run pushed task branches",
+    description: "Turn on auto mode: queued tasks run and finish automatically until /auto-stop",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      if (running) {
-        ctx.ui.notify("Auto is already running.", "warning");
+      const autoState = getAutoSessionState(ctx.sessionManager);
+      if (autoState.stop) {
+        ctx.ui.notify("Auto mode is already on.", "warning");
         return;
       }
 
-      running = true;
       let stopped = false;
-      let sawTaskActivity = false;
       stopCurrentRun = () => {
         stopped = true;
+        wakeParkedLoop?.();
       };
-      stopAutoLoop = stopCurrentRun;
+      autoState.stop = stopCurrentRun;
 
       const autoStatusOptions = {
-        prefix: "[auto] ",
+        prefix: AUTO_STATUS_PREFIX,
       } satisfies TaskStatusOptions;
       refreshTaskStatus(ctx, autoStatusOptions);
 
-      try {
-        while (!stopped) {
-          await ctx.waitForIdle();
+      const runLoop = async (): Promise<void> => {
+        try {
+          while (!stopped) {
+            await ctx.waitForIdle();
 
-          // Re-check after idle: userCtrlC/stopped may have been set
-          // while we were waiting (the reaction engine runs before the
-          // waiter resolves). Without this, we'd fall through to task
-          // processing and might call finishTask even though the session
-          // was shut down.
-          if (stopped) break;
+            // Re-check after idle: userCtrlC/stopped may have been set
+            // while we were waiting (the reaction engine runs before the
+            // waiter resolves). Without this, we'd fall through to task
+            // processing and might call finishTask even though the session
+            // was shut down.
+            if (stopped) break;
 
-          if (lastAssistantWasAborted(ctx.sessionManager)) break;
+            if (lastAssistantWasAborted(ctx.sessionManager)) break;
 
-          if (pendingTask(ctx.sessionManager)) {
-            const result = await startTask(pi, ctx, {
-              statusPrefix: autoStatusOptions.prefix,
-              waitForAgentStart,
-            });
-            if (result === "cancelled" || result === "launch-timeout") break;
-            sawTaskActivity = true;
-            continue;
-          }
-
-          if (pendingResume(ctx.sessionManager)) {
-            const result = await resumeTask(pi, ctx, {
-              statusPrefix: autoStatusOptions.prefix,
-              waitForAgentStart,
-            });
-            // A discarded resume request ("error") is consumed with a visible
-            // warning — keep the loop alive so queued tasks still run.
-            // Only break on cancel/timeout.
-            if (result && result !== "error") break;
-            sawTaskActivity = true;
-            continue;
-          }
-
-          const activeTask = currentTask(ctx.sessionManager);
-          if (activeTask) {
-            // Never auto-finalize before the task branch has produced a reply.
-            if (!hasAssistantAfterTaskStart(ctx.sessionManager, activeTask.id)) {
-              ctx.ui.notify(
-                "Auto stopped: the task agent has not produced a reply yet. Re-run /auto to resume supervision.",
-                "warning",
-              );
-              break;
-            }
-
-            // A pending task-ask is relayed by suspending first, so the
-            // mainline answers it instead of the task being finalized.
-            if (pendingAsk(ctx.sessionManager, activeTask.id)) {
-              const result = await suspendTask(pi, ctx, {
+            if (pendingTask(ctx.sessionManager)) {
+              const result = await startTask(pi, ctx, {
                 statusPrefix: autoStatusOptions.prefix,
+                waitForAgentStart,
               });
-              if (result === "cancelled") break;
-              sawTaskActivity = true;
+              if (result === "cancelled" || result === "launch-timeout") break;
               continue;
             }
 
-            const result = await finishTask(pi, ctx, {
-              statusPrefix: autoStatusOptions.prefix,
+            if (pendingResume(ctx.sessionManager)) {
+              const result = await resumeTask(pi, ctx, {
+                statusPrefix: autoStatusOptions.prefix,
+                waitForAgentStart,
+              });
+              // A discarded resume request ("error") is consumed with a visible
+              // warning — keep the loop alive so queued tasks still run.
+              // Only break on cancel/timeout.
+              if (result && result !== "error") break;
+              continue;
+            }
+
+            const activeTask = currentTask(ctx.sessionManager);
+            if (activeTask) {
+              // Never auto-finalize before the task branch has produced a reply.
+              if (!hasAssistantAfterTaskStart(ctx.sessionManager, activeTask.id)) {
+                ctx.ui.notify(
+                  "Auto stopped: the task agent has not produced a reply yet. Re-run /auto to resume supervision.",
+                  "warning",
+                );
+                break;
+              }
+
+              // A pending task-ask is relayed by suspending first, so the
+              // mainline answers it instead of the task being finalized.
+              if (pendingAsk(ctx.sessionManager, activeTask.id)) {
+                const result = await suspendTask(pi, ctx, {
+                  statusPrefix: autoStatusOptions.prefix,
+                });
+                if (result === "cancelled") break;
+                continue;
+              }
+
+              const result = await finishTask(pi, ctx, {
+                statusPrefix: autoStatusOptions.prefix,
+              });
+              if (result === "cancelled") break;
+              continue;
+            }
+
+            // Nothing to do: park until the next agent run ends (or a
+            // stop) wakes the loop. The snapshot is taken synchronously with
+            // the last state check, so an agent_end between the check and
+            // the park is detected below instead of being lost.
+            const agentEndsAtPark = agentEndCount;
+            setAutoParked(ctx.sessionManager, true);
+            await new Promise<void>((resolve) => {
+              wakeParkedLoop = () => {
+                wakeParkedLoop = null;
+                setAutoParked(ctx.sessionManager, false);
+                resolve();
+              };
             });
-            if (result === "cancelled") break;
-            sawTaskActivity = true;
-            continue;
+            // An agent_end fired while the loop was draining (before this
+            // park): state may have changed since the last check — skip
+            // parking and re-check instead of going idle on stale state.
+            if (agentEndCount > agentEndsAtPark) continue;
           }
-
-          // No pending tasks and no current task
-          if (!sawTaskActivity) {
-            // Never had any task activity — nothing to process
-            ctx.ui.notify("No pending tasks to run.", "info");
-            break;
-          }
-
-          if (!ctx.hasPendingMessages()) {
-            break;
+        } finally {
+          settleAgentStartWaiter(false);
+          autoState.stop = undefined;
+          stopCurrentRun = null;
+          wakeParkedLoop = null;
+          setAutoParked(ctx.sessionManager, false);
+          flushAutoParkedWaiters(ctx.sessionManager);
+          try {
+            refreshTaskStatus(ctx);
+          } catch {
+            // The session may already be disposed/reloaded (stale ctx); there
+            // is no status line left to update.
           }
         }
-      } finally {
-        settleAgentStartWaiter(false);
-        stopAutoLoop = null;
-        stopCurrentRun = null;
-        refreshTaskStatus(ctx);
-        running = false;
-      }
+      };
+
+      ctx.ui.notify(
+        "Auto mode on. Queued tasks run and finish automatically. /auto-stop turns it off.",
+        "info",
+      );
+
+      // Detach: the command returns immediately and the loop supervises task
+      // work in the background until /auto-stop (or an interrupt) stops it.
+      void runLoop().catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        try {
+          ctx.ui.notify(`Auto stopped unexpectedly: ${message}`, "error");
+        } catch {
+          console.error(`[auto] loop crashed: ${message}`);
+        }
+      });
     },
   };
 }
 
 export function cmdAutoStop(): CommandOptions {
   return {
-    description: "Stop the running /auto loop at the next step boundary",
+    description: "Turn auto mode off (stops the /auto loop at the next step boundary)",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      if (stopAutoLoop) {
-        stopAutoLoop();
+      const stop = autoSessionStates.get(ctx.sessionManager)?.stop;
+      if (stop) {
+        stop();
         ctx.ui.notify(
-          "Auto stop requested. It stops before the next step; the current task stays resumable.",
+          "Auto mode off. It stops before the next step; the current task stays resumable.",
           "info",
         );
       } else {
@@ -493,52 +548,6 @@ export const rendererTaskQuestion: MessageRenderer<{ title?: string; question?: 
   box.addChild(new Text(`${label}\n${text}`, 0, 0));
   return box;
 };
-
-export function updateTaskStatus(
-  session: ReadonlySessionLike,
-  setStatus: (key: string, value: string | undefined) => void,
-  theme: TaskStatusTheme,
-  options: TaskStatusOptions = {},
-): void {
-  const prefix = options.prefix ?? "";
-  const pending = pendingTasks(session);
-  if (pending.length > 0) {
-    const title = taskTitle(pending[0].data.title);
-    const queued = pending.length > 1 ? ` (+${pending.length - 1} queued)` : "";
-    setStatus("task", `${prefix}${theme.fg("accent", `pending task: ${title}${queued}`)}`);
-    return;
-  }
-
-  const resume = pendingResume(session);
-  if (resume) {
-    const resumeTitle = resume.data.title ? `: ${taskTitle(resume.data.title)}` : "";
-    setStatus("task", `${prefix}${theme.fg("accent", `pending resume${resumeTitle}`)}`);
-    return;
-  }
-
-  const active = currentTask(session);
-  if (active) {
-    setStatus(
-      "task",
-      `${prefix}${theme.fg("warning", `current task: ${taskTitle(active.data.title)}`)}`,
-    );
-    return;
-  }
-
-  // Suspended runs are resumable (or, after a relayed task-ask, still
-  // awaiting the mainline's answer). Shown in muted so the actionable
-  // states above stay visually dominant.
-  const suspended = latestSuspendedTask(session);
-  if (suspended) {
-    const title = taskTitle(suspended.data.title);
-    const text =
-      suspended.data.reason === "ask" ? `awaiting answer: ${title}` : `suspended: ${title}`;
-    setStatus("task", `${prefix}${theme.fg("muted", text)}`);
-    return;
-  }
-
-  setStatus("task", undefined);
-}
 
 export function setSkills(s: Skill[]): void {
   skills = s;
@@ -610,6 +619,106 @@ export function taskQuestionMarker(title: string): string {
   return `[task-question: ${title}]\n\n`;
 }
 
+export function refreshTaskStatus(ctx: TaskStatusContext, options: TaskStatusOptions = {}): void {
+  if (ctx.hasUI) {
+    // The "[auto]" prefix is sticky while the auto switch is on: every
+    // refresh (including event-handler ones without explicit options)
+    // carries it, and it disappears once the loop exits.
+    const prefix = options.prefix ?? (isAutoActive(ctx.sessionManager) ? AUTO_STATUS_PREFIX : "");
+    updateTaskStatus(ctx.sessionManager, ctx.ui.setStatus.bind(ctx.ui), ctx.ui.theme, {
+      ...options,
+      prefix,
+    });
+  }
+}
+
+export function updateTaskStatus(
+  session: ReadonlySessionLike,
+  setStatus: (key: string, value: string | undefined) => void,
+  theme: TaskStatusTheme,
+  options: TaskStatusOptions = {},
+): void {
+  const prefix = options.prefix ?? "";
+  const pending = pendingTasks(session);
+  if (pending.length > 0) {
+    const title = taskTitle(pending[0].data.title);
+    const queued = pending.length > 1 ? ` (+${pending.length - 1} queued)` : "";
+    setStatus("task", `${prefix}${theme.fg("accent", `pending task: ${title}${queued}`)}`);
+    return;
+  }
+
+  const resume = pendingResume(session);
+  if (resume) {
+    const resumeTitle = resume.data.title ? `: ${taskTitle(resume.data.title)}` : "";
+    setStatus("task", `${prefix}${theme.fg("accent", `pending resume${resumeTitle}`)}`);
+    return;
+  }
+
+  const active = currentTask(session);
+  if (active) {
+    setStatus(
+      "task",
+      `${prefix}${theme.fg("warning", `current task: ${taskTitle(active.data.title)}`)}`,
+    );
+    return;
+  }
+
+  // Suspended runs are resumable (or, after a relayed task-ask, still
+  // awaiting the mainline's answer). Shown in muted so the actionable
+  // states above stay visually dominant.
+  const suspended = latestSuspendedTask(session);
+  if (suspended) {
+    const title = taskTitle(suspended.data.title);
+    const text =
+      suspended.data.reason === "ask" ? `awaiting answer: ${title}` : `suspended: ${title}`;
+    setStatus("task", `${prefix}${theme.fg("muted", text)}`);
+    return;
+  }
+
+  setStatus("task", undefined);
+}
+
+/**
+ * Locate `skills/<name>/SKILL.md` relative to this file. The walk is capped
+ * at depth 2 — the current directory (source layout, skills/ would sit next
+ * to src/) and the package root (published layout, skills/ next to
+ * src/index.ts) — so it never escapes the extension package and cannot pick
+ * up same-named skills from ancestor directories.
+ */
+export function findOwnSkillFile(
+  name: string,
+  startDir = dirname(fileURLToPath(import.meta.url)),
+): string | undefined {
+  let dir = startDir;
+  for (let depth = 0; depth < 2; depth++) {
+    const candidate = join(dir, "skills", name, "SKILL.md");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+  return undefined;
+}
+
+/** Whether auto mode is currently on (the background loop is armed). */
+export function isAutoActive(sessionManager: object): boolean {
+  return autoSessionStates.get(sessionManager)?.stop !== undefined;
+}
+
+/**
+ * Resolve once the running auto loop has drained all pending work and parked
+ * (or stopped). Resolves immediately when no loop is running or it is already
+ * parked. Test-only synchronization: /auto returns right after arming, so
+ * tests need a barrier before asserting the drained state.
+ */
+export function whenAutoParked(sessionManager: object): Promise<void> {
+  const state = autoSessionStates.get(sessionManager);
+  if (!state?.stop || state.parked) return Promise.resolve();
+  return new Promise((resolve) => {
+    state.parkedWaiters.push(resolve);
+  });
+}
+
 /**
  * Relay instructions appended to an injected task question (after the
  * question text). Exported so tests can strip them in sync with production.
@@ -624,6 +733,8 @@ const AUTO_AGENT_START_TIMEOUT_MS = 60_000;
 const TASK_BRANCH_ONLY_TOOLS = ["task-ask"];
 
 const MAINLINE_ONLY_TOOLS = ["push-task", "resume-task"];
+
+const AUTO_STATUS_PREFIX = "[auto] ";
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
@@ -665,6 +776,8 @@ type TaskAskParams = Static<typeof taskAskParameters>;
 type ResumeTaskAPI = Pick<ExtensionAPI, "appendEntry">;
 
 type TaskAskAPI = Pick<ExtensionAPI, "appendEntry">;
+
+type TaskStatusContext = Pick<ExtensionCommandContext, "hasUI" | "sessionManager" | "ui">;
 
 /**
  * Shared call renderer for the task tools: a styled header followed by the
@@ -1170,14 +1283,6 @@ type TaskCommandAPI = Pick<
   | "setActiveTools"
 >;
 
-function refreshTaskStatus(ctx: TaskStatusContext, options: TaskStatusOptions = {}): void {
-  if (ctx.hasUI) {
-    updateTaskStatus(ctx.sessionManager, ctx.ui.setStatus.bind(ctx.ui), ctx.ui.theme, options);
-  }
-}
-
-type TaskStatusContext = Pick<ExtensionCommandContext, "hasUI" | "sessionManager" | "ui">;
-
 /** Type guard: is the entry an assistant message with content? */
 function isAssistantMessageEntry(
   entry: SessionEntry,
@@ -1262,8 +1367,6 @@ function pendingResume(session: ReadonlySessionLike): TaskResumeEntry | null {
   return stack[0] ?? null;
 }
 
-const TASK_RESUME_DONE_ENTRY_TYPE = "task-resume-done";
-
 /** Id recorded by a task-resume-done, or undefined for legacy entries without one. */
 function taskResumeDoneEntryId(entry: SessionEntry): string | undefined {
   if (entry.type !== "custom" || entry.customType !== TASK_RESUME_DONE_ENTRY_TYPE) {
@@ -1272,6 +1375,8 @@ function taskResumeDoneEntryId(entry: SessionEntry): string | undefined {
   const data: unknown = entry.data;
   return isRecord(data) && typeof data.resumeEntryId === "string" ? data.resumeEntryId : undefined;
 }
+
+const TASK_RESUME_DONE_ENTRY_TYPE = "task-resume-done";
 
 function latestSuspendedTask(session: ReadonlySessionLike): TaskSuspendedEntry | null {
   return findLastEntry(session, isTaskSuspendedEntry) ?? null;
@@ -1290,6 +1395,16 @@ function shouldConsumeTaskEntry(session: ReadonlySessionLike, taskStart: TaskSta
     return taskEntryPending(session, taskStart.data.taskEntryId);
   }
   return !taskStart.data.resume && pendingTask(session) !== null;
+}
+
+/** Queue head: the task /start-task, /discard-task, and /auto act on. */
+function pendingTask(session: ReadonlySessionLike): TaskEntry | null {
+  return pendingTasks(session)[0] ?? null;
+}
+
+/** Whether the queued task entry is still unconsumed (id-based queue accounting). */
+function taskEntryPending(session: ReadonlySessionLike, taskEntryId: string): boolean {
+  return pendingTasks(session).some((task) => task.id === taskEntryId);
 }
 
 // ── Lookup utilities ──────────────────────────────────────────────
@@ -1328,21 +1443,11 @@ function pendingTasks(session: ReadonlySessionLike): TaskEntry[] {
   return stack;
 }
 
-/** Queue head: the task /start-task, /discard-task, and /auto act on. */
-function pendingTask(session: ReadonlySessionLike): TaskEntry | null {
-  return pendingTasks(session)[0] ?? null;
-}
-
 /** Id recorded by a task-done, or undefined for legacy entries without one. */
 function taskDoneEntryId(entry: SessionEntry): string | undefined {
   if (entry.type !== "custom" || entry.customType !== TASK_DONE_ENTRY_TYPE) return undefined;
   const data: unknown = entry.data;
   return isRecord(data) && typeof data.taskEntryId === "string" ? data.taskEntryId : undefined;
-}
-
-/** Whether the queued task entry is still unconsumed (id-based queue accounting). */
-function taskEntryPending(session: ReadonlySessionLike, taskEntryId: string): boolean {
-  return pendingTasks(session).some((task) => task.id === taskEntryId);
 }
 
 const TASK_DONE_ENTRY_TYPE = "task-done";
@@ -1611,52 +1716,6 @@ interface ResolveResult {
 }
 
 /**
- * Fallback lookup in the extension's own bundled skills directory.
- *
- * The registry is primed from Pi's loaded skills via before_agent_start. If
- * Pi fails to load a skill (e.g. a rejected frontmatter parse) or the
- * extension runs without its package `pi.skills` metadata discovered, the
- * role skills must still resolve, so this walks up from this file's
- * directory looking for `skills/<name>/SKILL.md` — the extension stays
- * self-contained instead of depending on the upstream load chain.
- */
-function ownSkillByName(name: string): Skill | undefined {
-  const filePath = findOwnSkillFile(name);
-  if (!filePath) return undefined;
-  const baseDir = dirname(filePath);
-  return {
-    name,
-    description: "Bundled role skill resolved from the extension's own skills directory.",
-    filePath,
-    baseDir,
-    sourceInfo: createSyntheticSourceInfo(filePath, { source: "extension", origin: "package" }),
-    disableModelInvocation: true,
-  };
-}
-
-/**
- * Locate `skills/<name>/SKILL.md` relative to this file. The walk is capped
- * at depth 2 — the current directory (source layout, skills/ would sit next
- * to src/) and the package root (published layout, skills/ next to
- * src/index.ts) — so it never escapes the extension package and cannot pick
- * up same-named skills from ancestor directories.
- */
-export function findOwnSkillFile(
-  name: string,
-  startDir = dirname(fileURLToPath(import.meta.url)),
-): string | undefined {
-  let dir = startDir;
-  for (let depth = 0; depth < 2; depth++) {
-    const candidate = join(dir, "skills", name, "SKILL.md");
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
-  return undefined;
-}
-
-/**
  * Append the resolved role skills' SKILL.md content to the delivered prompt.
  * Deterministic role loading: the task branch receives the full role contract
  * inline instead of depending on the model reading the referenced file paths.
@@ -1673,6 +1732,14 @@ async function inlineRoleSkills(prompt: string, refs?: TaskData["skills"]): Prom
   }
   if (sections.length === 0) return prompt;
   return `${prompt}\n\n${sections.join("\n\n")}`;
+}
+
+interface TaskData {
+  title?: string;
+  prompt: string;
+  fork?: boolean;
+  /** Resolved role skills (/skill: refs) inlined into the delivered prompt. */
+  skills?: Array<{ name: string; filePath: string }>;
 }
 
 /**
@@ -1695,12 +1762,28 @@ async function readRoleSkill(ref: { name: string; filePath: string }): Promise<s
   }
 }
 
-interface TaskData {
-  title?: string;
-  prompt: string;
-  fork?: boolean;
-  /** Resolved role skills (/skill: refs) inlined into the delivered prompt. */
-  skills?: Array<{ name: string; filePath: string }>;
+/**
+ * Fallback lookup in the extension's own bundled skills directory.
+ *
+ * The registry is primed from Pi's loaded skills via before_agent_start. If
+ * Pi fails to load a skill (e.g. a rejected frontmatter parse) or the
+ * extension runs without its package `pi.skills` metadata discovered, the
+ * role skills must still resolve, so this walks up from this file's
+ * directory looking for `skills/<name>/SKILL.md` — the extension stays
+ * self-contained instead of depending on the upstream load chain.
+ */
+function ownSkillByName(name: string): Skill | undefined {
+  const filePath = findOwnSkillFile(name);
+  if (!filePath) return undefined;
+  const baseDir = dirname(filePath);
+  return {
+    name,
+    description: "Bundled role skill resolved from the extension's own skills directory.",
+    filePath,
+    baseDir,
+    sourceInfo: createSyntheticSourceInfo(filePath, { source: "extension", origin: "package" }),
+    disableModelInvocation: true,
+  };
 }
 
 /**
@@ -1756,10 +1839,44 @@ function matchModels(pattern: string, registry: ModelRegistry): Model<Api>[] {
     );
 }
 
+function setAutoParked(sessionManager: object, parked: boolean): void {
+  const state = getAutoSessionState(sessionManager);
+  state.parked = parked;
+  if (parked) flushAutoParkedWaiters(sessionManager);
+}
+
+function getAutoSessionState(sessionManager: object): AutoSessionState {
+  let state = autoSessionStates.get(sessionManager);
+  if (!state) {
+    state = { stop: undefined, parked: false, parkedWaiters: [] };
+    autoSessionStates.set(sessionManager, state);
+  }
+  return state;
+}
+
 // Set while cmdAuto's loop is running; /auto-stop calls it to request a
 // graceful stop at the next step boundary (no idempotence issue: the loop
 // re-checks the stopped flag after every waitForIdle).
-let stopAutoLoop: (() => void) | null = null;
+interface AutoSessionState {
+  /** Set while the auto loop is armed for this session. */
+  stop: (() => void) | undefined;
+  /** True while the loop is parked waiting for the next agent_end wake. */
+  parked: boolean;
+  /** Waiters resolved on each park transition (see whenAutoParked). */
+  parkedWaiters: Array<() => void>;
+}
+
+function flushAutoParkedWaiters(sessionManager: object): void {
+  const state = autoSessionStates.get(sessionManager);
+  if (!state) return;
+  const waiters = state.parkedWaiters;
+  state.parkedWaiters = [];
+  for (const resolve of waiters) resolve();
+}
+
+// Auto state is keyed by SessionManager: several sessions can share one
+// process (the test harness runs many), so module-level globals would leak.
+const autoSessionStates = new WeakMap<object, AutoSessionState>();
 
 /**
  * Tool order captured at the first visibility sync. Pi rebuilds the system

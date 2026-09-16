@@ -26,6 +26,7 @@ describe("automated workflow", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(
         user("main work"),
@@ -34,18 +35,40 @@ describe("automated workflow", () => {
         taskResult("quick fix", "Fixed the bug."),
         assistant("Great!"),
       );
-      h.assertStatus("suspended: quick fix");
+      h.assertStatus("[auto] suspended: quick fix");
     } finally {
       h.dispose();
     }
   });
 
-  it("notifies and exits when started with no pending tasks", async () => {
+  it("turns on with no pending tasks, then auto-executes a later push", async () => {
     const h = await TestHarness.create();
+    h.llm.onPrompt("main work", responds("working..."), pushTask("quick fix", "Quick fix."));
+
+    h.llm.onPrompt("Quick fix.", responds("Fixed the bug."));
+    h.llm.onPrompt("[task-result: quick fix]\n\nFixed the bug.", responds("Great!"));
+
     try {
+      // No tasks yet: the switch just turns on and parks.
       await h.prompt("/auto");
       h.assertSession();
-      h.assertLastNotification("No pending tasks to run.");
+      h.assertLastNotification(
+        "Auto mode on. Queued tasks run and finish automatically. /auto-stop turns it off.",
+      );
+
+      // A task pushed afterwards runs and finishes automatically — no
+      // further /auto invocation needed.
+      await h.prompt("main work");
+      await h.waitForAutoParked();
+
+      h.assertSession(
+        user("main work"),
+        assistant("working...", "toolUse"),
+        task("quick fix", "Quick fix."),
+        taskResult("quick fix", "Fixed the bug."),
+        assistant("Great!"),
+      );
+      h.assertStatus("[auto] suspended: quick fix");
     } finally {
       h.dispose();
     }
@@ -59,11 +82,13 @@ describe("automated workflow", () => {
     h.llm.onPrompt("first task", responds("done"));
     h.llm.onPrompt("[task-result: x]\n\ndone", responds(""));
 
+    // The second /auto runs while the loop is still draining the first task.
     h.user.onAssistant("done", userPrompts("/auto"));
     try {
       await h.prompt("start");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(
         user("start"),
@@ -72,13 +97,13 @@ describe("automated workflow", () => {
         taskResult("x", "done"),
         assistant(""),
       );
-      h.assertStatus("suspended: x");
+      h.assertStatus("[auto] suspended: x");
     } finally {
       h.dispose();
     }
   });
 
-  it("stops when the last assistant message is aborted to empty text", async () => {
+  it("turns off when the last assistant message is aborted to empty text", async () => {
     const h = await TestHarness.create();
     h.llm.onPrompt("start", responds(""), pushTask("implement phase 1", "Implement phase 1."));
 
@@ -89,6 +114,7 @@ describe("automated workflow", () => {
       await h.prompt("start");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(user("Implement phase 1."), assistantAborted());
       h.assertStatus("current task: implement phase 1");
@@ -113,6 +139,7 @@ describe("automated workflow", () => {
       await h.prompt("main work");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(
         user("main work"),
@@ -121,7 +148,7 @@ describe("automated workflow", () => {
         taskResult("x", "parent done"),
         assistant(""),
       );
-      h.assertStatus("suspended: x");
+      h.assertStatus("[auto] suspended: x");
       // The rejected call never queued a subtask anywhere in the tree.
       assert.strictEqual(h.countAllCustomEntries("task"), 1);
     } finally {
@@ -129,7 +156,7 @@ describe("automated workflow", () => {
     }
   });
 
-  it("continues processing when user queues a steering message during auto", async () => {
+  it("delivers a queued steering message when the task finishes, then finalizes", async () => {
     const h = await TestHarness.create();
     h.llm.onPrompt("start", responds(""), pushTask("quick fix", "Quick fix."));
 
@@ -146,7 +173,12 @@ describe("automated workflow", () => {
       await h.prompt("start");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
+      // The queued steering message becomes the task branch's next user turn;
+      // the branch replies on its own and auto finishes with the adjusted
+      // result (pi delivers queued messages at agent_end and emits
+      // agent_settled only after the follow-up run).
       h.assertSession(
         user("start"),
         assistant("", "toolUse"),
@@ -154,7 +186,7 @@ describe("automated workflow", () => {
         taskResult("quick fix", "adjusted response"),
         assistant(""),
       );
-      h.assertStatus("suspended: quick fix");
+      h.assertStatus("[auto] suspended: quick fix");
     } finally {
       h.dispose();
     }
@@ -175,6 +207,7 @@ describe("automated workflow", () => {
       await h.prompt("start");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(user("Shutdown task"), assistant("working..."));
       h.assertStatus("current task: x");
@@ -190,6 +223,7 @@ describe("automated workflow", () => {
       // interrupted right after /start-task) must not silently end /auto.
       h.appendCustomEntry("task-start", { title: "AAA", returnTo: "unknown" });
       await h.prompt("/auto");
+      await h.waitForAutoParked();
       h.assertLastNotification(
         "Auto stopped: the task agent has not produced a reply yet. Re-run /auto to resume supervision.",
       );
@@ -213,9 +247,10 @@ describe("automated workflow", () => {
       await h.prompt("start");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertLastNotification(
-        "Auto stop requested. It stops before the next step; the current task stays resumable.",
+        "Auto mode off. It stops before the next step; the current task stays resumable.",
       );
       h.assertSession(user("first task"), assistant("working..."));
       h.assertStatus("current task: x");
@@ -249,12 +284,36 @@ describe("automated workflow", () => {
       await h.prompt("start");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertLastNotification(
-        "Auto stop requested. It stops before the next step; the current task stays resumable.",
+        "Auto mode off. It stops before the next step; the current task stays resumable.",
       );
       h.assertSession(user("first task"), assistant("working..."));
       h.assertStatus("current task: x");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("keeps a pushed task queued once auto mode is off", async () => {
+    const h = await TestHarness.create();
+    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
+
+    try {
+      await h.prompt("/auto");
+      h.assertLastNotification(
+        "Auto mode on. Queued tasks run and finish automatically. /auto-stop turns it off.",
+      );
+
+      await h.prompt("/auto-stop");
+      await h.waitForAutoParked();
+
+      // With the switch off, a pushed task stays queued and is not executed.
+      await h.prompt("start");
+
+      h.assertSession(user("start"), assistant("", "toolUse"), task("x", "first task"));
+      h.assertStatus("pending task: x");
     } finally {
       h.dispose();
     }
@@ -275,11 +334,13 @@ describe("automated workflow", () => {
       await h.prompt("start");
 
       await h.prompt("/auto");
+      await h.waitForAutoParked();
       // First run stopped at the step boundary; the task is left open.
       h.assertStatus("current task: x");
 
       // Re-running /auto picks the open task back up and finalizes it.
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(
         user("start"),
@@ -288,7 +349,7 @@ describe("automated workflow", () => {
         taskResult("x", "working..."),
         assistant(""),
       );
-      h.assertStatus("suspended: x");
+      h.assertStatus("[auto] suspended: x");
     } finally {
       h.dispose();
     }

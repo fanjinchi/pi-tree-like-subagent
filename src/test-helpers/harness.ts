@@ -18,6 +18,7 @@ import registerSuperGsd from "../../index.js";
 import { isDeepStrictEqual } from "node:util";
 import { extractTextContent } from "../text-content.js";
 import { type SessionEntry as TestSessionEntry, TestSession } from "./test-session.js";
+import { whenAutoParked } from "../index.js";
 import { TestUi } from "./test-ui.js";
 import { FAUX_MODEL, FAUX_PROVIDER, FauxProvider, type PromptMessage } from "./faux-provider.js";
 import { MockLLM } from "./mock-llm.js";
@@ -199,6 +200,14 @@ export class TestHarness {
 
   async waitForIdle(): Promise<void> {
     await this.scanAndReactLoop();
+  }
+
+  /**
+   * Wait until the background /auto loop has drained all pending work and
+   * parked (or stopped). Resolves immediately when no loop is running.
+   */
+  async waitForAutoParked(): Promise<void> {
+    await whenAutoParked(this.sessionManager);
   }
 
   registeredToolNames(): string[] {

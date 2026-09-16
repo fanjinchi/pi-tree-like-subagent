@@ -10,6 +10,7 @@ import {
   cmdResumeTask,
   cmdStartTask,
   cmdSuspendTask,
+  refreshTaskStatus,
   rendererTaskQuestion,
   rendererTaskResult,
   setSkillsFromEvent,
@@ -18,7 +19,6 @@ import {
   toolPushTask,
   toolResumeTask,
   toolTaskAsk,
-  updateTaskStatus,
 } from "./src/index.js";
 
 export default function register(pi: ExtensionAPI): void {
@@ -47,15 +47,15 @@ export default function register(pi: ExtensionAPI): void {
     setModelRegistry(ctx.modelRegistry);
     captureToolOrder(pi.getActiveTools());
     syncTaskToolVisibility(pi, ctx.sessionManager);
-    updateTaskStatus(ctx.sessionManager, ctx.ui.setStatus.bind(ctx.ui), ctx.ui.theme);
+    refreshTaskStatus(ctx);
   });
 
   pi.on("turn_end", async (_event, ctx) => {
-    updateTaskStatus(ctx.sessionManager, ctx.ui.setStatus.bind(ctx.ui), ctx.ui.theme);
+    refreshTaskStatus(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
     syncTaskToolVisibility(pi, ctx.sessionManager);
-    updateTaskStatus(ctx.sessionManager, ctx.ui.setStatus.bind(ctx.ui), ctx.ui.theme);
+    refreshTaskStatus(ctx);
   });
 }

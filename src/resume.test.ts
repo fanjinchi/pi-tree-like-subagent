@@ -71,6 +71,7 @@ describe("resume-task", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/auto");
+      await h.waitForAutoParked();
 
       h.assertSession(
         user("main work"),
@@ -84,7 +85,7 @@ describe("resume-task", () => {
       assert.strictEqual(h.countBranchCustomEntries("task-resume"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-resume-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);
-      h.assertStatus("suspended: AAA");
+      h.assertStatus("[auto] suspended: AAA");
     } finally {
       h.dispose();
     }
