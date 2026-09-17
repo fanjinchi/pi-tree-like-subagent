@@ -76,6 +76,8 @@ describe("task queue (FIFO)", () => {
 
       // The queue head (AAA) still runs; BBB was consumed by the legacy done.
       await h.prompt("/start-task");
+      // Stop the relay: this test drives the bookkeeping by hand.
+      await h.prompt("/auto-stop");
       h.assertSession(user("first prompt"), assistant("first done"));
       await h.prompt("/finish-task");
       h.assertStatus("suspended: AAA");
@@ -146,6 +148,8 @@ describe("task queue (FIFO)", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/start-task");
+      // Stop the relay: this test consumes resume requests by hand.
+      await h.prompt("/auto-stop");
       await h.prompt("/finish-task");
 
       const [firstId, secondId] = h.branchCustomEntryIds("task-resume");
@@ -193,6 +197,8 @@ describe("task queue (FIFO)", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/start-task");
+      // Stop the relay: this test consumes resume requests by hand.
+      await h.prompt("/auto-stop");
       await h.prompt("/finish-task");
 
       const [firstId, secondId] = h.branchCustomEntryIds("task-resume");

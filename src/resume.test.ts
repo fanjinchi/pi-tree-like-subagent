@@ -290,6 +290,8 @@ describe("resume-task", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/start-task");
+      // Stop the relay: this test consumes the queued request by hand.
+      await h.prompt("/auto-stop");
       await h.prompt("/finish-task");
       // The result turn queued a resume request for a title that does not exist.
       assert.strictEqual(h.countBranchCustomEntries("task-resume"), 1);

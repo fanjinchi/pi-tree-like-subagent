@@ -52,7 +52,9 @@ describe("task status bar", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/start-task");
-      await h.prompt("/suspend-task");
+      // Starting the task arms the relay, which suspends on its own — no
+      // manual /suspend-task needed.
+      await h.waitForAutoParked();
       h.assertStatus("awaiting answer: AAA");
 
       await h.prompt("/resume-task The answer is SQLite.");

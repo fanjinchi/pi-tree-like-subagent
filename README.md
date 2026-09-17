@@ -9,7 +9,7 @@ Minimal task automation for [Pi](https://pi.dev) without subagents, using the Pi
 用 Pi 的 session tree 来实现"类 subagent"的任务分支，这个想法很棒。但实际使用中我发现它每次任务都从一个干净的上下文开始，于是补上了几块拼图：
 
 - **fork 启动**：任务可以直接从当前会话分叉出去执行，实现代码时不再丢失前面计划阶段的讨论上下文。
-- **task-ask**：任务执行期间可以向主线（或经主线向用户）提问，而不是闷头干到底。
+- **task-ask**：任务执行期间可以向主线（或经主线向用户）提问，而不是闷头干到底。任务一启动，提问就在回合结束时自动切回主线、由主线作答，答完自动回到任务分支。
 - **resume**：后续 review 发现问题时，带着意见回到当初实现代码的那个 session 分支继续修复，上下文一点不丢。
 
 另一个灵感来源是 [ttttmr/pi-context](https://github.com/ttttmr/pi-context)：它自称受 Kimi 的 d-mail 启发，让 AI 自己管理上下文、自己决定跳转到哪里——思路很有意思，但不知是不是我的使用场景问题，实际很少触发（我日常压缩上下文用的是 [billion-context-pi](https://github.com/ranxianglei/billion-context-pi)）。不过这个思路值得借鉴：本项目既然已经用 tree 来代替 subagent，task 目的明确、分支清晰，天然契合"沿 tree 跳转上下文"的想法——resume/suspend 就是把这种跳转做成了带语义的、看得见的操作。
@@ -19,7 +19,7 @@ Minimal task automation for [Pi](https://pi.dev) without subagents, using the Pi
 对比 fork 来源 [pi-supergsd](https://github.com/skhoroshavin/pi-supergsd)，本项目的改动：
 
 - 修复了 `/finish-task` 有时不唤醒 AI 的问题；
-- 新增上面说的 fork（从当前上下文开始任务）、resume（带消息回到旧任务分支）、task-ask（任务内向主线/用户提问）；
+- 新增上面说的 fork（从当前上下文开始任务）、resume（带消息回到旧任务分支）、task-ask（任务内向主线/用户提问，并自动中转：提问自动切回主线、答案自动回到分支）；
 - 删除了打包自 Superpowers 的 `brainstorming`、`executing-plans`、`finishing-a-development-branch`、`writing-plans`、`writing-roadmaps` 技能——我自己在用 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 做工作流，感觉不再需要 Superpowers 的 plan 流程（也不知道哪个更好，详见下文 _Differences from upstream_）。
 
 **English**
@@ -27,7 +27,7 @@ Minimal task automation for [Pi](https://pi.dev) without subagents, using the Pi
 Using Pi's session tree to implement "subagent-like" task branches is a great idea. But in daily use I found that every task started from a clean context, so this fork adds a few missing pieces:
 
 - **Forked starts**: a task can branch off the current session, so implementing code no longer loses the planning-phase discussion context.
-- **task-ask**: a task can ask questions to the mainline (or, relayed through it, to the user) instead of working in silence.
+- **task-ask**: a task can ask questions to the mainline (or, relayed through it, to the user) instead of working in silence — the question switches back to the mainline automatically when the task's turn ends, and the answer comes back into the branch.
 - **resume**: when a later review finds problems, you can send the findings back into the very session branch that wrote the code and fix it there, with full context intact.
 
 Another inspiration is [ttttmr/pi-context](https://github.com/ttttmr/pi-context), which — inspired by Kimi's d-mail — lets the AI manage its own context and decide where to jump. An interesting idea, though in my scenarios it rarely triggered (for context compression I use [billion-context-pi](https://github.com/ranxianglei/billion-context-pi)). Still, the idea is worth borrowing: since this project already uses the tree instead of subagents, and tasks have clear purposes with explicit branches, it fits naturally with "jumping along the tree" — resume/suspend turns those jumps into semantic, visible operations.
@@ -37,7 +37,7 @@ Honestly, the further this goes, the more it feels like a "flavored subagent". I
 Compared with the fork source [pi-supergsd](https://github.com/skhoroshavin/pi-supergsd):
 
 - fixed a bug where `/finish-task` sometimes failed to wake the AI;
-- added the fork / resume / task-ask features described above;
+- added the fork / resume / task-ask features described above (task questions are relayed to the mainline and back automatically);
 - removed the bundled Superpowers skills `brainstorming`, `executing-plans`, `finishing-a-development-branch`, `writing-plans`, `writing-roadmaps` — I use [OpenSpec](https://github.com/Fission-AI/OpenSpec) for my workflow and no longer need Superpowers' planning flow (not sure which is better; see _Differences from upstream_ below).
 
 ## Install
@@ -60,7 +60,7 @@ If Pi is already running, restart it or run `/reload`.
 
 Pi coding agent doesn't include a built-in sub-agent tool. Its author [Mario Zechner](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/) explains why: they're "a black box within a black box" — you can't see what they do, context doesn't transfer well, and debugging is painful. Pi's session tree gives you that control instead.
 
-This extension adds a minimal task system that keeps those principles: minimal, in your control, nothing hidden. It introduces a few tools (`push-task`, `resume-task`, `task-ask`) and commands. No background processes, no parallel agents — `/auto` is a foreground serial loop, and `task-ask` is a suspend-relay, not async execution. A task runs as a branch in the session tree, so standard Pi tools work as expected, and every state transition is a visible entry you can navigate to. Start a fresh-context review, check the results, bring them back. Fork an implementation task with the current discussion as its context. Resume a finished task with review findings. Or queue tasks and run them hands-free with `/auto`, while still seeing everything that's happening and able to stop, reprompt, and continue at any point.
+This extension adds a minimal task system that keeps those principles: minimal, in your control, nothing hidden. It introduces a few tools (`push-task`, `resume-task`, `task-ask`) and commands. No background processes, no parallel agents — one foreground serial loop supervises task work: the `/auto` loop, and the quiet *relay* that `/start-task` and `/resume-task` arm so that task questions switch back to the mainline and their answers switch back into the branch on their own. The loop parks when it has nothing to do (no timers, no polling), and `/auto-stop` turns both off. `task-ask` is a suspend-relay, not async execution. A task runs as a branch in the session tree, so standard Pi tools work as expected, and every state transition is a visible entry you can navigate to. Start a fresh-context review, check the results, bring them back. Fork an implementation task with the current discussion as its context. Resume a finished task with review findings. Or queue tasks and run them hands-free with `/auto`, while still seeing everything that's happening and able to stop, reprompt, and continue at any point.
 
 This extension also bundles the task role skills (`task-implement`, `task-research`, `task-review`) that `push-task` inlines into task prompts.
 
@@ -88,11 +88,13 @@ Remaining skills:
 | `/abort-task`         | Returns from task branch to saved checkpoint without attaching any result (the queue head stays pending — re-run `/auto` to retry it, or `/discard-task` to drop it) |
 | `/discard-task`       | Discards a pending task without executing it                                            |
 | `/resume-task [text]` | Resumes the most recently suspended task branch (or a queued resume-task request)       |
-| `/suspend-task`       | Suspends the current task and returns to the mainline (relays a pending question)       |
+| `/suspend-task`       | Suspends the current task and returns to the mainline — the manual relay, for when the automatic relay is off |
 | `/auto`               | EXPERIMENTAL! Runs pending tasks and queued resumes hands-free, relaying questions      |
-| `/auto-stop`          | Stops the running `/auto` loop at the next step boundary (current task stays resumable) |
+| `/auto-stop`          | Stops the running `/auto` loop and the automatic ask relay (current task stays resumable) |
 
 `/auto` runs as a foreground loop: type `/auto-stop` (works even while the loop is waiting) to end it gracefully after the current step — the running task is left suspended/current and can be resumed with `/resume-task` or by re-running `/auto`. Esc meanwhile interrupts the currently streaming agent turn, which also ends the loop. When both kinds of work are queued, `/auto` finishes the task queue first and only then runs queued resume requests.
+
+Starting a task with `/start-task` or `/resume-task` arms the supervisor in its relay mode: when the task's turn ends with a `task-ask`, the session switches back to the mainline automatically, the mainline answers, and its `resume-task` switches back into the branch automatically. `/auto` runs the same loop with extra duties — it also starts queued tasks and queued resumes, and finishes an open branch once it has a reply. Answering a question directly inside the branch only works while the relay is off (`/auto-stop`); `/suspend-task` relays a pending question by hand.
 
 If `[model]` is passed to `/start-task`, the model switches before the task prompt is sent. On `/finish-task`, `/abort-task`, or `/suspend-task`, the original model is restored.
 
@@ -120,7 +122,7 @@ Queues a resume of a finished, aborted, or suspended task branch, carrying a `me
 
 ### `task-ask` tool (task branches only)
 
-Lets the task AI ask the **mainline orchestrator** a question. The task suspends, the question is relayed to the mainline as a `[task-question: <title>]` message, the mainline AI answers (using its own context, escalating to you only when needed), and a `resume-task` carries the answer back into the branch. Under `/auto` this whole relay runs hands-free; manually, use `/suspend-task` to relay a pending question (or just answer it directly inside the branch).
+Lets the task AI ask the **mainline orchestrator** a question. The task suspends, the question is relayed to the mainline as a `[task-question: <title>]` message, the mainline AI answers (using its own context, escalating to you only when needed), and a `resume-task` carries the answer back into the branch. This relay runs automatically whenever a task supervisor is armed — `/start-task` and `/resume-task` arm it silently, `/auto` does the same and more — and `/auto-stop` turns it off. With the relay off (or before the supervisor was ever armed), use `/suspend-task` to relay a pending question manually, or just answer it directly inside the branch.
 
 Tool visibility is branch-scoped: `task-ask` only appears inside task branches, `push-task`/`resume-task` only outside them (session-level, not persisted; execute-time guards back it up). Note this means a task branch cannot queue nested tasks — orchestration stays on the mainline. If you disabled any of these tools via `/tools`, the visibility sync will re-enable them when the matching branch state applies.
 
@@ -195,18 +197,20 @@ Pi:      [returns to the mainline with the follow-up report]
 A task hits a decision it can't make. It calls `task-ask` instead of guessing.
 
 ```
-You:     /auto
+You:     /start-task
 
 Pi:      [task branch] LLM: [calls task-ask({ question: "Add a new config key or reuse X?" })]
 
-Pi:      [suspends the task, returns to the mainline, relays the question]
+Pi:      [suspends the task, switches back to the mainline, relays the question — automatically]
 
 LLM:     [mainline] Reuse X — it already covers this. [calls resume-task with the answer]
 
-Pi:      [resumes the task branch with the answer]
+Pi:      [switches back into the task branch with the answer — automatically]
 
 LLM:     [task branch] Continues with X. ...
 ```
+
+`/start-task` (and `/resume-task`) arm this relay silently; `/auto` runs the same loop with the extra job of starting queued tasks and finishing open branches; `/auto-stop` turns it off. With the relay off, `/suspend-task` relays the question by hand.
 
 If the mainline AI can't answer either, it asks you (with a user-question plugin such as `ask_user_question` if you have one, otherwise in plain text) and relays your answer. Inside a task branch the AI can likewise use such a plugin directly to ask you without the relay.
 

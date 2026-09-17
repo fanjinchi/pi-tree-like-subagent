@@ -128,7 +128,7 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
     promptSnippet: "Queue a resume of a suspended task branch with a message.",
     promptGuidelines: [
       "Use resume-task to send follow-up input (review findings, answers, corrections) into a task branch that finished, aborted, or was suspended.",
-      "resume-task queues the resume; while auto mode is on it executes automatically, otherwise it takes effect when the user runs /resume-task or /auto.",
+      "resume-task queues the resume; while a task supervisor is running it executes automatically (supervision is armed by /start-task, /resume-task, and /auto, and stopped by /auto-stop); with supervision off it takes effect when the user runs /resume-task or /auto.",
       "resume-task notifies the user itself; do not write any further text in the same turn after calling it.",
       "Do not batch multiple resume-task calls together, and do not mix resume-task with other tool calls in the same turn.",
     ],
@@ -159,14 +159,16 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
         message: params.message,
       });
 
-      const resumeQueuedMessage = isAutoActive(ctx.sessionManager)
-        ? "Resume queued. Auto mode is on - it executes automatically."
+      // Relay-aware, but branch-tip only (never part of a system prompt).
+      const armed = isSupervisorActive(ctx.sessionManager);
+      const resumeQueuedMessage = armed
+        ? "Resume queued. It is executed automatically."
         : "Resume queued. It takes effect via `/resume-task` or `/auto`.";
 
       if (ctx.hasUI) {
         refreshTaskStatus(ctx);
         ctx.ui.notify(
-          isAutoActive(ctx.sessionManager)
+          armed
             ? resumeQueuedMessage
             : "Resume queued. Run `/resume-task` or `/auto` to execute it.",
           "info",
@@ -195,11 +197,11 @@ export function toolTaskAsk(pi: TaskAskAPI): ToolDefinition {
     name: "task-ask",
     label: "Task Ask",
     description:
-      "Ask the mainline orchestrator a question from inside a task branch. The task suspends until the answer arrives via resume.",
+      "Ask the mainline orchestrator a question from inside a task branch. The task suspends and the question is relayed to the mainline automatically; the answer arrives as a resume message.",
     promptSnippet: "Ask the mainline orchestrator a question from inside a task branch.",
     promptGuidelines: [
       "Use task-ask only inside a task branch when you need information or a decision from the mainline orchestrator to continue the task.",
-      "After calling task-ask, stop working and wait: the question is recorded and relayed to the mainline (automatically while auto mode is on, or when the user runs /suspend-task); the answer arrives as a resume message. Do not call other tools alongside task-ask.",
+      "After calling task-ask, stop working and wait: the question is recorded and relayed to the mainline automatically (unless the relay was stopped with /auto-stop, in which case the user relays it with /suspend-task); the answer arrives as a resume message. Do not call other tools alongside task-ask.",
       "If the question needs a human answer and a user-question tool (such as ask_user_question) is available, prefer it over relaying through the mainline - it works inside task branches and resumes your turn directly.",
       "task-ask is not for the final report - the last assistant message of a task is its report.",
     ],
@@ -223,8 +225,12 @@ export function toolTaskAsk(pi: TaskAskAPI): ToolDefinition {
       pi.appendEntry(TASK_ASK_ENTRY_TYPE, { question: params.question });
 
       if (ctx.hasUI) {
+        // Branch-tip text only (never part of a system prompt), so it may
+        // reflect the live supervisor state.
         ctx.ui.notify(
-          "Task question recorded. While auto mode is on the task suspends automatically; otherwise run /suspend-task to relay it, or answer it directly in this branch.",
+          isSupervisorActive(ctx.sessionManager)
+            ? "Task question recorded. The task suspends and the question is relayed to the mainline automatically."
+            : "Task question recorded. Run /suspend-task to relay it, or answer it directly in this branch.",
           "info",
         );
       }
@@ -233,7 +239,9 @@ export function toolTaskAsk(pi: TaskAskAPI): ToolDefinition {
         content: [
           {
             type: "text",
-            text: "Question recorded; the task is now waiting for an answer. While auto mode is on the task suspends and the question is relayed to the mainline orchestrator automatically; otherwise the user may relay it with /suspend-task or answer directly in this branch. The answer arrives as a resume message. Stop working until the answer arrives.",
+            text: isSupervisorActive(ctx.sessionManager)
+              ? "Question recorded; the task is now waiting for an answer. It is suspended and relayed to the mainline orchestrator automatically. The answer arrives as a resume message. Stop working until the answer arrives."
+              : "Question recorded; the task is now waiting for an answer. The user may relay it with /suspend-task or answer directly in this branch. The answer arrives as a resume message. Stop working until the answer arrives.",
           },
         ],
         details: { question: params.question },
@@ -253,7 +261,13 @@ export function cmdStartTask(pi: TaskCommandAPI): CommandOptions {
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       await ctx.waitForIdle();
       const modelArg = args.trim() || undefined;
-      await startTask(pi, ctx, { modelArg });
+      const result = await startTask(pi, ctx, { modelArg });
+      // Starting a task arms the supervisor in relay policy: from here on,
+      // a task-ask switches back to the mainline by itself and the answer
+      // comes back without the user running /suspend-task or /resume-task.
+      if (result === "started" || result === "launch-timeout") {
+        armSupervisor(pi, ctx, "relay");
+      }
     },
   };
 }
@@ -294,7 +308,12 @@ export function cmdResumeTask(pi: TaskCommandAPI): CommandOptions {
       "Resume the most recently suspended task branch (or a queued resume-task request), optionally with an extra message",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       await ctx.waitForIdle();
-      await resumeTask(pi, ctx, { messageArg: args });
+      const result = await resumeTask(pi, ctx, { messageArg: args });
+      // Re-arm the relay: the resumed run keeps asking questions and getting
+      // answers without manual /suspend-task and /resume-task calls.
+      if (result === "started" || result === "launch-timeout") {
+        armSupervisor(pi, ctx, "relay");
+      }
     },
   };
 }
@@ -310,41 +329,23 @@ export function cmdSuspendTask(pi: TaskCommandAPI): CommandOptions {
   };
 }
 
-export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
-  let stopCurrentRun: (() => void) | null = null;
-  let wakeParkedLoop: (() => void) | null = null;
-  let agentStartWaiter: AgentStartWaiter | null = null;
-  // Total agent_end events observed. The loop snapshots it at the park
-  // point, so a run that ended during the drain cannot be lost by parking
-  // anyway: the snapshot comparison makes the loop re-check instead.
-  let agentEndCount = 0;
-
-  const settleAgentStartWaiter = (started: boolean): void => {
-    const waiter = agentStartWaiter;
-    if (!waiter) return;
-
-    agentStartWaiter = null;
-    clearTimeout(waiter.timeout);
-    waiter.resolve(started);
-  };
-
-  const waitForAgentStart = (taskStartId: string): Promise<boolean> => {
-    if (agentStartWaiter) {
-      throw new Error("An agent-start waiter is already active.");
-    }
-
-    return new Promise((resolve) => {
-      agentStartWaiter = {
-        taskStartId,
-        resolve,
-        timeout: setTimeout(() => settleAgentStartWaiter(false), AUTO_AGENT_START_TIMEOUT_MS),
-      };
-    });
-  };
-
+/**
+ * Wire the task supervisor's session events. Registered once at extension
+ * load (root index.ts) instead of by the /auto command, so a relay
+ * supervisor armed by /start-task or /resume-task gets the same wake and
+ * shutdown handling without /auto ever having been run.
+ */
+export function setupTaskSupervisor(pi: Pick<ExtensionAPI, "on">): void {
+  // The barrier resolves when Pi reports the run as active. Comparing the
+  // current task guards against a stale waiter: an unrelated run (e.g. after
+  // the user finished the task and started another) must not settle it.
   pi.on("agent_start", (_event, ctx) => {
-    if (agentStartWaiter && currentTask(ctx.sessionManager)?.id === agentStartWaiter.taskStartId) {
-      settleAgentStartWaiter(true);
+    const state = supervisorStates.get(ctx.sessionManager);
+    if (
+      state?.agentStartWaiter &&
+      currentTask(ctx.sessionManager)?.id === state.agentStartWaiter.taskStartId
+    ) {
+      settleAgentStartWaiter(state, true);
     }
   });
 
@@ -353,167 +354,60 @@ export function cmdAuto(pi: AutoCommandAPI): CommandOptions {
   // run), which is the safe point to re-check task state. The handler only
   // resolves the park promise — navigation stays inside the command loop
   // (navigateTree is command-context-only).
-  pi.on("agent_end", () => {
-    agentEndCount += 1;
-    wakeParkedLoop?.();
+  pi.on("agent_end", (_event, ctx) => {
+    const state = supervisorStates.get(ctx.sessionManager);
+    if (!state) return;
+    state.agentEndCount += 1;
+    state.wake?.();
   });
 
-  pi.on("session_shutdown", async () => {
-    stopCurrentRun?.();
-    settleAgentStartWaiter(false);
+  pi.on("session_shutdown", (_event, ctx) => {
+    const state = supervisorStates.get(ctx.sessionManager);
+    if (!state) return;
+    state.stop?.();
+    settleAgentStartWaiter(state, false);
   });
+}
 
+export function cmdAuto(pi: TaskCommandAPI): CommandOptions {
   return {
     description: "Turn on auto mode: queued tasks run and finish automatically until /auto-stop",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      const autoState = getAutoSessionState(ctx.sessionManager);
-      if (autoState.stop) {
+      const result = armSupervisor(pi, ctx, "auto");
+      if (result === "already-auto") {
         ctx.ui.notify("Auto mode is already on.", "warning");
         return;
       }
 
-      let stopped = false;
-      stopCurrentRun = () => {
-        stopped = true;
-        wakeParkedLoop?.();
-      };
-      autoState.stop = stopCurrentRun;
-
-      const autoStatusOptions = {
-        prefix: AUTO_STATUS_PREFIX,
-      } satisfies TaskStatusOptions;
-      refreshTaskStatus(ctx, autoStatusOptions);
-
-      const runLoop = async (): Promise<void> => {
-        try {
-          while (!stopped) {
-            await ctx.waitForIdle();
-
-            // Re-check after idle: userCtrlC/stopped may have been set
-            // while we were waiting (the reaction engine runs before the
-            // waiter resolves). Without this, we'd fall through to task
-            // processing and might call finishTask even though the session
-            // was shut down.
-            if (stopped) break;
-
-            if (lastAssistantWasAborted(ctx.sessionManager)) break;
-
-            if (pendingTask(ctx.sessionManager)) {
-              const result = await startTask(pi, ctx, {
-                statusPrefix: autoStatusOptions.prefix,
-                waitForAgentStart,
-              });
-              if (result === "cancelled" || result === "launch-timeout") break;
-              continue;
-            }
-
-            if (pendingResume(ctx.sessionManager)) {
-              const result = await resumeTask(pi, ctx, {
-                statusPrefix: autoStatusOptions.prefix,
-                waitForAgentStart,
-              });
-              // A discarded resume request ("error") is consumed with a visible
-              // warning — keep the loop alive so queued tasks still run.
-              // Only break on cancel/timeout.
-              if (result && result !== "error") break;
-              continue;
-            }
-
-            const activeTask = currentTask(ctx.sessionManager);
-            if (activeTask) {
-              // Never auto-finalize before the task branch has produced a reply.
-              if (!hasAssistantAfterTaskStart(ctx.sessionManager, activeTask.id)) {
-                ctx.ui.notify(
-                  "Auto stopped: the task agent has not produced a reply yet. Re-run /auto to resume supervision.",
-                  "warning",
-                );
-                break;
-              }
-
-              // A pending task-ask is relayed by suspending first, so the
-              // mainline answers it instead of the task being finalized.
-              if (pendingAsk(ctx.sessionManager, activeTask.id)) {
-                const result = await suspendTask(pi, ctx, {
-                  statusPrefix: autoStatusOptions.prefix,
-                });
-                if (result === "cancelled") break;
-                continue;
-              }
-
-              const result = await finishTask(pi, ctx, {
-                statusPrefix: autoStatusOptions.prefix,
-              });
-              if (result === "cancelled") break;
-              continue;
-            }
-
-            // Nothing to do: park until the next agent run ends (or a
-            // stop) wakes the loop. The snapshot is taken synchronously with
-            // the last state check, so an agent_end between the check and
-            // the park is detected below instead of being lost.
-            const agentEndsAtPark = agentEndCount;
-            setAutoParked(ctx.sessionManager, true);
-            await new Promise<void>((resolve) => {
-              wakeParkedLoop = () => {
-                wakeParkedLoop = null;
-                setAutoParked(ctx.sessionManager, false);
-                resolve();
-              };
-            });
-            // An agent_end fired while the loop was draining (before this
-            // park): state may have changed since the last check — skip
-            // parking and re-check instead of going idle on stale state.
-            if (agentEndCount > agentEndsAtPark) continue;
-          }
-        } finally {
-          settleAgentStartWaiter(false);
-          autoState.stop = undefined;
-          stopCurrentRun = null;
-          wakeParkedLoop = null;
-          setAutoParked(ctx.sessionManager, false);
-          flushAutoParkedWaiters(ctx.sessionManager);
-          try {
-            refreshTaskStatus(ctx);
-          } catch {
-            // The session may already be disposed/reloaded (stale ctx); there
-            // is no status line left to update.
-          }
-        }
-      };
-
+      if (result === "armed") {
+        refreshTaskStatus(ctx, { prefix: AUTO_STATUS_PREFIX });
+      }
       ctx.ui.notify(
         "Auto mode on. Queued tasks run and finish automatically. /auto-stop turns it off.",
         "info",
       );
-
-      // Detach: the command returns immediately and the loop supervises task
-      // work in the background until /auto-stop (or an interrupt) stops it.
-      void runLoop().catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        try {
-          ctx.ui.notify(`Auto stopped unexpectedly: ${message}`, "error");
-        } catch {
-          console.error(`[auto] loop crashed: ${message}`);
-        }
-      });
     },
   };
 }
 
 export function cmdAutoStop(): CommandOptions {
   return {
-    description: "Turn auto mode off (stops the /auto loop at the next step boundary)",
+    description: "Turn supervision off (stops the /auto loop and the ask relay)",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      const stop = autoSessionStates.get(ctx.sessionManager)?.stop;
-      if (stop) {
-        stop();
-        ctx.ui.notify(
-          "Auto mode off. It stops before the next step; the current task stays resumable.",
-          "info",
-        );
-      } else {
+      const state = supervisorStates.get(ctx.sessionManager);
+      if (!state?.stop) {
         ctx.ui.notify("Auto is not running.", "warning");
+        return;
       }
+
+      const mode = state.mode;
+      state.stop();
+      ctx.ui.notify(
+        mode === "relay"
+          ? "Ask relay off. Task questions stay in the branch until /suspend-task; the next /start-task or /resume-task re-arms the relay."
+          : "Auto mode off. It stops before the next step; the current task stays resumable.",
+        "info",
+      );
     },
   };
 }
@@ -639,6 +533,19 @@ export function updateTaskStatus(
   options: TaskStatusOptions = {},
 ): void {
   const prefix = options.prefix ?? "";
+  const suspended = latestSuspendedTask(session);
+
+  // A relayed question outranks queued-but-unstarted work: while the relay is
+  // answering it, "awaiting answer" is the state that needs attention (a
+  // batch run would otherwise keep showing "pending task: ..." instead).
+  if (suspended?.data.reason === "ask") {
+    setStatus(
+      "task",
+      `${prefix}${theme.fg("muted", `awaiting answer: ${taskTitle(suspended.data.title)}`)}`,
+    );
+    return;
+  }
+
   const pending = pendingTasks(session);
   if (pending.length > 0) {
     const title = taskTitle(pending[0].data.title);
@@ -663,15 +570,13 @@ export function updateTaskStatus(
     return;
   }
 
-  // Suspended runs are resumable (or, after a relayed task-ask, still
-  // awaiting the mainline's answer). Shown in muted so the actionable
-  // states above stay visually dominant.
-  const suspended = latestSuspendedTask(session);
+  // Suspended runs are resumable checkpoints (relayed questions were handled
+  // above). Shown in muted so the actionable states above stay dominant.
   if (suspended) {
-    const title = taskTitle(suspended.data.title);
-    const text =
-      suspended.data.reason === "ask" ? `awaiting answer: ${title}` : `suspended: ${title}`;
-    setStatus("task", `${prefix}${theme.fg("muted", text)}`);
+    setStatus(
+      "task",
+      `${prefix}${theme.fg("muted", `suspended: ${taskTitle(suspended.data.title)}`)}`,
+    );
     return;
   }
 
@@ -700,19 +605,33 @@ export function findOwnSkillFile(
   return undefined;
 }
 
-/** Whether auto mode is currently on (the background loop is armed). */
+/** Whether auto mode is on (a supervisor loop armed in `auto` policy). */
 export function isAutoActive(sessionManager: object): boolean {
-  return autoSessionStates.get(sessionManager)?.stop !== undefined;
+  const state = supervisorStates.get(sessionManager);
+  return state?.stop !== undefined && state.mode === "auto";
 }
 
 /**
- * Resolve once the running auto loop has drained all pending work and parked
- * (or stopped). Resolves immediately when no loop is running or it is already
- * parked. Test-only synchronization: /auto returns right after arming, so
- * tests need a barrier before asserting the drained state.
+ * Whether any supervisor loop is armed for this session (auto or relay).
+ * Relay-aware wording uses this; the "[auto] " status prefix stays bound to
+ * isAutoActive.
+ */
+export function isSupervisorActive(sessionManager: object): boolean {
+  return supervisorStates.get(sessionManager)?.stop !== undefined;
+}
+
+/**
+ * Resolve once the supervisor loop is parked (or no loop is running).
+ * Resolves immediately when no loop is running or it is already parked.
+ * Test-only synchronization: the arming command returns right after starting
+ * the detached loop, so tests need a barrier before asserting.
+ *
+ * Note: this only guarantees "parked", not "drained" - the loop parks at the
+ * end of every iteration (a relay supervisor parks after each suspend and
+ * each resume), so assert on stable points and never on this barrier alone.
  */
 export function whenAutoParked(sessionManager: object): Promise<void> {
-  const state = autoSessionStates.get(sessionManager);
+  const state = supervisorStates.get(sessionManager);
   if (!state?.stop || state.parked) return Promise.resolve();
   return new Promise((resolve) => {
     state.parkedWaiters.push(resolve);
@@ -726,21 +645,15 @@ export function whenAutoParked(sessionManager: object): Promise<void> {
 export const taskQuestionInstructions =
   "(The task is suspended waiting for this answer. Answer it here, then call resume-task with the answer in `message` to resume the task; if you cannot answer, ask the user - with a user-question tool if one is available, otherwise in plain text - and relay their answer the same way.)";
 
-const AUTO_AGENT_START_TIMEOUT_MS = 60_000;
-
 // ── Tool visibility sync ──────────────────────────────────────────
 
 const TASK_BRANCH_ONLY_TOOLS = ["task-ask"];
 
 const MAINLINE_ONLY_TOOLS = ["push-task", "resume-task"];
 
-const AUTO_STATUS_PREFIX = "[auto] ";
-
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
 type PushTaskAPI = Pick<ExtensionAPI, "appendEntry">;
-
-type AutoCommandAPI = TaskCommandAPI & Pick<ExtensionAPI, "on">;
 
 type TaskStatusTheme = Pick<Theme, "fg">;
 
@@ -749,12 +662,6 @@ type TaskStatusOptions = {
 };
 
 type PushTaskParams = Static<typeof pushTaskParameters>;
-
-type AgentStartWaiter = {
-  taskStartId: string;
-  resolve: (started: boolean) => void;
-  timeout: ReturnType<typeof setTimeout>;
-};
 
 type ResumeTaskOptions = TaskActionOptions & {
   /** Extra message from `/resume-task <text>`; appended to a queued request's message. */
@@ -778,6 +685,223 @@ type ResumeTaskAPI = Pick<ExtensionAPI, "appendEntry">;
 type TaskAskAPI = Pick<ExtensionAPI, "appendEntry">;
 
 type TaskStatusContext = Pick<ExtensionCommandContext, "hasUI" | "sessionManager" | "ui">;
+
+/**
+ * Arm (or upgrade) the per-session supervisor loop. Navigation is only
+ * possible from a command context (navigateTree / waitForIdle exist on
+ * ExtensionCommandContext, not on event or tool contexts), which is why the
+ * arming command hands its context to the detached loop.
+ */
+function armSupervisor(
+  pi: TaskCommandAPI,
+  ctx: ExtensionCommandContext,
+  mode: SupervisorMode,
+): "armed" | "upgraded" | "already-auto" | "already-supervised" {
+  const state = getSupervisorState(ctx.sessionManager);
+
+  if (state.stop) {
+    // The loop is still alive (`stop` is cleared by its `finally`). Remember
+    // the request so that a loop which is stopping right now re-arms instead
+    // of swallowing it (the `/auto-stop` → `/start-task` window). A latch
+    // left behind by a healthy loop is dropped by the next `stop()` and is
+    // never honored by a loop that stopped itself.
+    state.reArm = mode;
+
+    if (mode === "relay") return "already-supervised";
+    if (state.mode === "auto") return "already-auto";
+
+    // A parked relay loop waits on its wake promise; switch the policy and
+    // wake it so it re-evaluates (it re-reads state.mode every iteration).
+    state.mode = "auto";
+    state.wake?.();
+    refreshTaskStatus(ctx, { prefix: AUTO_STATUS_PREFIX });
+    return "upgraded";
+  }
+
+  state.mode = mode;
+  // Detach: the command returns immediately and the loop supervises task
+  // work in the background until /auto-stop (or an interrupt) stops it.
+  void runSupervisorLoop(pi, ctx, state).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      ctx.ui.notify(`Supervisor stopped unexpectedly: ${message}`, "error");
+    } catch {
+      console.error(`[supervisor] loop crashed: ${message}`);
+    }
+  });
+  return "armed";
+}
+
+/**
+ * The single foreground supervision loop (one per session). It never polls:
+ * each iteration does its work and parks on a promise that the agent_end
+ * handler resolves. All navigation happens here, on the command context the
+ * arming command supplied.
+ */
+async function runSupervisorLoop(
+  pi: TaskCommandAPI,
+  ctx: ExtensionCommandContext,
+  state: TaskSupervisorState,
+): Promise<void> {
+  let stopped = false;
+  // Only a stop the user (or the shutdown handler) asked for may re-arm: see
+  // the latch handling in `finally`.
+  let stoppedByRequest = false;
+  state.stop = () => {
+    // A latch belongs to this stop only: drop any older one, so a stop can
+    // never be undone by a stale re-arm request.
+    state.reArm = undefined;
+    stoppedByRequest = true;
+    stopped = true;
+    state.wake?.();
+  };
+
+  try {
+    while (!stopped) {
+      await ctx.waitForIdle();
+
+      // Re-check after idle: stopped may have been set while we were waiting
+      // (the reaction engine runs before the waiter resolves). Without this,
+      // we'd fall through to task processing and might call finishTask even
+      // though the session was shut down.
+      if (stopped) break;
+
+      // Re-read the policy per iteration: /auto can upgrade a parked relay
+      // supervisor, which changes what this loop is allowed to do.
+      const auto = state.mode === "auto";
+      // The "[auto] " prefix marks the /auto switch, so a relay supervisor
+      // passes none (refreshTaskStatus keeps it sticky while auto runs).
+      const statusPrefix = auto ? AUTO_STATUS_PREFIX : undefined;
+
+      if (auto && lastAssistantWasAborted(ctx.sessionManager)) break;
+
+      // Starting queued tasks is /auto's job; a relay supervisor never
+      // touches the queue.
+      if (auto && pendingTask(ctx.sessionManager)) {
+        const result = await startTask(pi, ctx, {
+          statusPrefix,
+          waitForAgentStart: (taskStartId) => waitForAgentStart(state, taskStartId),
+        });
+        // "error" is a refused/failed start that was already reported to the
+        // user; only a cancelled navigation or a launch timeout ends
+        // supervision.
+        if (result !== "started" && result !== "error") break;
+        continue;
+      }
+
+      if (pendingResume(ctx.sessionManager)) {
+        const result = await resumeTask(pi, ctx, {
+          statusPrefix,
+          waitForAgentStart: (taskStartId) => waitForAgentStart(state, taskStartId),
+        });
+        // A discarded resume request ("error") is consumed with a visible
+        // warning — keep the loop alive so queued tasks still run. Only a
+        // cancelled navigation ends supervision; a launch timeout ends auto
+        // mode but merely parks a relay supervisor, which is still armed to
+        // relay the next question.
+        if (result === "cancelled") break;
+        if (result === "launch-timeout" && auto) break;
+        continue;
+      }
+
+      const activeTask = currentTask(ctx.sessionManager);
+      if (activeTask) {
+        const hasReply = hasAssistantAfterTaskStart(ctx.sessionManager, activeTask.id);
+        if (!hasReply && auto) {
+          // Never auto-finalize before the task branch has produced a reply.
+          ctx.ui.notify(
+            "Auto stopped: the task agent has not produced a reply yet. Re-run /auto to resume supervision.",
+            "warning",
+          );
+          break;
+        }
+
+        // A pending task-ask is relayed by suspending first, so the mainline
+        // answers it instead of the task being finalized.
+        if (hasReply && pendingAsk(ctx.sessionManager, activeTask.id)) {
+          const result = await suspendTask(pi, ctx, { statusPrefix });
+          if (result === "cancelled") break;
+          continue;
+        }
+
+        // Finishing a run is /auto's job; a relay supervisor leaves that
+        // decision to the user (/finish-task, /abort-task) and parks instead.
+        if (hasReply && auto) {
+          const result = await finishTask(pi, ctx, { statusPrefix });
+          if (result === "cancelled") break;
+          continue;
+        }
+      }
+
+      // Nothing to do: park until the next agent run ends (or a
+      // stop) wakes the loop. The snapshot is taken synchronously with
+      // the last state check, so an agent_end between the check and
+      // the park is detected below instead of being lost.
+      const agentEndsAtPark = state.agentEndCount;
+      setSupervisorParked(ctx.sessionManager, true);
+      await new Promise<void>((resolve) => {
+        state.wake = () => {
+          state.wake = undefined;
+          setSupervisorParked(ctx.sessionManager, false);
+          resolve();
+        };
+      });
+      // An agent_end fired while the loop was draining (before this
+      // park): state may have changed since the last check — skip
+      // parking and re-check instead of going idle on stale state.
+      if (state.agentEndCount > agentEndsAtPark) continue;
+    }
+  } finally {
+    settleAgentStartWaiter(state, false);
+    state.stop = undefined;
+    state.wake = undefined;
+    setSupervisorParked(ctx.sessionManager, false);
+    flushParkedWaiters(ctx.sessionManager);
+    try {
+      refreshTaskStatus(ctx);
+    } catch {
+      // The session may already be disposed/reloaded (stale ctx); there is no
+      // status line left to update.
+    }
+
+    // An arm request that arrived while this loop was stopping (the
+    // /auto-stop → /start-task window) is latched instead of swallowed; arm a
+    // fresh loop for it rather than leaving the session unsupervised. Only a
+    // requested stop may re-arm: a loop that stopped itself (abort, launch
+    // timeout, cancelled navigation) must not resurrect supervision from a
+    // latch some earlier arm request left behind.
+    const reArm = state.reArm;
+    state.reArm = undefined;
+    if (reArm && stoppedByRequest) armSupervisor(pi, ctx, reArm);
+  }
+}
+
+const AUTO_STATUS_PREFIX = "[auto] ";
+
+function waitForAgentStart(state: TaskSupervisorState, taskStartId: string): Promise<boolean> {
+  if (state.agentStartWaiter) {
+    throw new Error("An agent-start waiter is already active.");
+  }
+
+  return new Promise((resolve) => {
+    state.agentStartWaiter = {
+      taskStartId,
+      resolve,
+      timeout: setTimeout(() => settleAgentStartWaiter(state, false), AUTO_AGENT_START_TIMEOUT_MS),
+    };
+  });
+}
+
+const AUTO_AGENT_START_TIMEOUT_MS = 60_000;
+
+function settleAgentStartWaiter(state: TaskSupervisorState, started: boolean): void {
+  const waiter = state.agentStartWaiter;
+  if (!waiter) return;
+
+  state.agentStartWaiter = undefined;
+  clearTimeout(waiter.timeout);
+  waiter.resolve(started);
+}
 
 /**
  * Shared call renderer for the task tools: a styled header followed by the
@@ -837,7 +961,7 @@ async function startTask(
   const activeTask = pendingTask(ctx.sessionManager);
   if (!activeTask) {
     ctx.ui.notify("No pending task. Use push-task first.", "warning");
-    return;
+    return "error";
   }
 
   // ── Model switching ─────────────────────────────────────────────
@@ -846,14 +970,14 @@ async function startTask(
     const matched = resolveModelPattern(options.modelArg, ctx.modelRegistry);
     if (matched === null) {
       ctx.ui.notify(`No model matching "${options.modelArg}".`, "warning");
-      return;
+      return "error";
     }
     if (matched === "ambiguous") {
       const names = matchModels(options.modelArg, ctx.modelRegistry)
         .map((m) => `${m.provider}/${m.id}`)
         .join(", ");
       ctx.ui.notify(`Ambiguous model: matches ${names}.`, "warning");
-      return;
+      return "error";
     }
 
     const currentModel = ctx.model;
@@ -864,7 +988,7 @@ async function startTask(
     const switched = await pi.setModel(matched);
     if (!switched) {
       ctx.ui.notify(`No API key configured for ${matched.provider}/${matched.id}.`, "warning");
-      return;
+      return "error";
     }
   }
 
@@ -875,7 +999,7 @@ async function startTask(
     const freshTargetId = findFreshTargetId(ctx.sessionManager);
     if (!freshTargetId) {
       ctx.ui.notify("No starting point found on current branch.", "warning");
-      return;
+      return "error";
     }
 
     const result = await ctx.navigateTree(freshTargetId, { summarize: false });
@@ -914,11 +1038,13 @@ async function startTask(
 
   if (agentStarted && !(await agentStarted)) {
     ctx.ui.notify(
-      `Auto stopped supervising: no agent_start was observed within ${AUTO_AGENT_START_TIMEOUT_MS / 1000} seconds (timeout or session shutdown). The task prompt was already delivered and may still run; check the branch before re-running /auto.`,
+      `Supervisor: no agent_start was observed within ${AUTO_AGENT_START_TIMEOUT_MS / 1000} seconds (timeout or session shutdown). The task prompt was already delivered and may still run; check the branch before restarting supervision.`,
       "error",
     );
     return "launch-timeout";
   }
+
+  return "started";
 }
 
 async function discardTask(
@@ -1129,7 +1255,7 @@ async function resumeTask(
       "No resumable task. A task becomes resumable after it is finished, aborted, or suspended.",
       "warning",
     );
-    return;
+    return "error";
   }
 
   const title = taskMarkerTitle(suspended.data.title);
@@ -1182,11 +1308,13 @@ async function resumeTask(
 
   if (agentStarted && !(await agentStarted)) {
     ctx.ui.notify(
-      `Auto stopped supervising: no agent_start for the resumed task was observed within ${AUTO_AGENT_START_TIMEOUT_MS / 1000} seconds (timeout or session shutdown). The resume message was already delivered and may still run; check the branch before re-running /auto.`,
+      `Supervisor: no agent_start for the resumed task was observed within ${AUTO_AGENT_START_TIMEOUT_MS / 1000} seconds (timeout or session shutdown). The resume message was already delivered and may still run - auto mode stops here, a relay stays armed; check the branch before restarting supervision.`,
       "error",
     );
     return "launch-timeout";
   }
+
+  return "started";
 }
 
 /**
@@ -1252,7 +1380,12 @@ async function suspendTask(
   refreshTaskStatus(ctx, { prefix: options.statusPrefix });
 }
 
-type TaskActionResult = "cancelled" | "launch-timeout" | "error" | void;
+/**
+ * Result of a task action. "started" means the prompt was delivered and Pi
+ * reported the agent as active; the void members are actions that never start
+ * a run at all (discard, finish, abort, suspend).
+ */
+type TaskActionResult = "started" | "cancelled" | "launch-timeout" | "error" | void;
 
 /** Restore the model that was active before a task started, if one was recorded. */
 async function restorePreviousModel(
@@ -1839,44 +1972,87 @@ function matchModels(pattern: string, registry: ModelRegistry): Model<Api>[] {
     );
 }
 
-function setAutoParked(sessionManager: object, parked: boolean): void {
-  const state = getAutoSessionState(sessionManager);
+function setSupervisorParked(sessionManager: object, parked: boolean): void {
+  const state = getSupervisorState(sessionManager);
   state.parked = parked;
-  if (parked) flushAutoParkedWaiters(sessionManager);
+  if (parked) flushParkedWaiters(sessionManager);
 }
 
-function getAutoSessionState(sessionManager: object): AutoSessionState {
-  let state = autoSessionStates.get(sessionManager);
+function getSupervisorState(sessionManager: object): TaskSupervisorState {
+  let state = supervisorStates.get(sessionManager);
   if (!state) {
-    state = { stop: undefined, parked: false, parkedWaiters: [] };
-    autoSessionStates.set(sessionManager, state);
+    state = {
+      stop: undefined,
+      mode: "auto",
+      reArm: undefined,
+      parked: false,
+      parkedWaiters: [],
+      wake: undefined,
+      agentEndCount: 0,
+      agentStartWaiter: undefined,
+    };
+    supervisorStates.set(sessionManager, state);
   }
   return state;
 }
 
-// Set while cmdAuto's loop is running; /auto-stop calls it to request a
-// graceful stop at the next step boundary (no idempotence issue: the loop
-// re-checks the stopped flag after every waitForIdle).
-interface AutoSessionState {
-  /** Set while the auto loop is armed for this session. */
+// One loop per session. Set while a supervisor loop is armed; /auto-stop
+// calls `stop` to request a graceful stop at the next step boundary (no
+// idempotence issue: the loop re-checks the stopped flag after every
+// waitForIdle).
+interface TaskSupervisorState {
+  /** Set while a supervisor loop is armed for this session. */
   stop: (() => void) | undefined;
+  /** Effective policy; /auto upgrades a running relay supervisor. */
+  mode: SupervisorMode;
+  /**
+   * Arm request latched while the loop is stopping (its `finally` re-arms
+   * with it): `/auto-stop` clears `stop` only after the current iteration,
+   * so an arming command in that window must not be swallowed. It is honored
+   * only when the stop was requested, and `stop()` drops any older latch, so
+   * it can never outlive the stop it belongs to.
+   */
+  reArm: SupervisorMode | undefined;
   /** True while the loop is parked waiting for the next agent_end wake. */
   parked: boolean;
   /** Waiters resolved on each park transition (see whenAutoParked). */
   parkedWaiters: Array<() => void>;
+  /** Resolves the current park; cleared when it fires. */
+  wake: (() => void) | undefined;
+  /**
+   * Total agent_end events observed. The loop snapshots it at the park
+   * point, so a run that ended during the drain cannot be lost by parking
+   * anyway: the snapshot comparison makes the loop re-check instead.
+   */
+  agentEndCount: number;
+  /** Barrier armed before sendUserMessage (AUTO_AGENT_START_TIMEOUT_MS). */
+  agentStartWaiter: AgentStartWaiter | undefined;
 }
 
-function flushAutoParkedWaiters(sessionManager: object): void {
-  const state = autoSessionStates.get(sessionManager);
+type AgentStartWaiter = {
+  taskStartId: string;
+  resolve: (started: boolean) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
+/**
+ * Which work the armed loop owns. `auto` is the /auto switch (start queued
+ * tasks, relay questions, finish runs); `relay` only moves questions to the
+ * mainline and carries the answer back into the branch.
+ */
+type SupervisorMode = "auto" | "relay";
+
+function flushParkedWaiters(sessionManager: object): void {
+  const state = supervisorStates.get(sessionManager);
   if (!state) return;
   const waiters = state.parkedWaiters;
   state.parkedWaiters = [];
   for (const resolve of waiters) resolve();
 }
 
-// Auto state is keyed by SessionManager: several sessions can share one
+// Supervisor state is keyed by SessionManager: several sessions can share one
 // process (the test harness runs many), so module-level globals would leak.
-const autoSessionStates = new WeakMap<object, AutoSessionState>();
+const supervisorStates = new WeakMap<object, TaskSupervisorState>();
 
 /**
  * Tool order captured at the first visibility sync. Pi rebuilds the system

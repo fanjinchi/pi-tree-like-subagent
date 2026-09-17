@@ -105,7 +105,8 @@ describe("task-ask", () => {
   it("manual /suspend-task relays the question; /resume-task carries the answer", async () => {
     const h = await TestHarness.create();
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
-    h.llm.onPrompt("some prompt", taskAsk("Which database?"));
+    h.llm.onPrompt("some prompt", responds("looked around"));
+    h.llm.onPrompt("need the schema", taskAsk("Which database?"));
     h.llm.onPrompt("[task-question: AAA]", responds("Let me check."));
     h.llm.onPrompt("The answer is SQLite.", responds("Done."));
     h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
@@ -113,6 +114,12 @@ describe("task-ask", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/start-task");
+      // The branch turn ends without an ask, so the relay parks instead of
+      // navigating; turn it off to exercise the manual relay path below.
+      await h.prompt("/auto-stop");
+      h.assertStatus("current task: AAA");
+
+      await h.prompt("need the schema");
       // task-ask terminated the turn; still inside the branch.
       h.assertStatus("current task: AAA");
       assert.strictEqual(h.countBranchCustomEntries("task-ask"), 1);
@@ -143,6 +150,8 @@ describe("task-ask", () => {
       await h.prompt("/resume-task The answer is SQLite.");
       h.assertSession(
         user("some prompt"),
+        assistant("looked around"),
+        user("need the schema"),
         assistant("", "toolUse"),
         user("The answer is SQLite."),
         assistant("Done."),
@@ -168,17 +177,25 @@ describe("task-ask", () => {
   it("a direct answer in the branch consumes the ask (no suspend on /auto)", async () => {
     const h = await TestHarness.create();
     h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
-    h.llm.onPrompt("some prompt", taskAsk("Which database?"));
+    h.llm.onPrompt("some prompt", responds("looked around"));
+    h.llm.onPrompt("need the schema", taskAsk("Which database?"));
     h.llm.onPrompt("SQLite.", responds("Thanks, done."));
     h.llm.onPrompt("[task-result: AAA]\n\nThanks, done.", responds("Great!"));
 
     try {
       await h.prompt("main work");
       await h.prompt("/start-task");
+      // Answering directly inside the branch is only reachable with relay
+      // supervision off — otherwise the ask suspends at once.
+      await h.prompt("/auto-stop");
+
+      await h.prompt("need the schema");
       h.assertStatus("current task: AAA");
 
       // The user answers directly inside the branch instead of suspending.
       await h.prompt("SQLite.");
+      h.assertStatus("current task: AAA");
+      assert.strictEqual(h.countBranchCustomEntries("task-ask"), 1);
 
       await h.prompt("/auto");
       await h.waitForAutoParked();

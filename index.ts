@@ -15,6 +15,7 @@ import {
   rendererTaskResult,
   setSkillsFromEvent,
   setModelRegistry,
+  setupTaskSupervisor,
   syncTaskToolVisibility,
   toolPushTask,
   toolResumeTask,
@@ -36,6 +37,11 @@ export default function register(pi: ExtensionAPI): void {
 
   pi.registerMessageRenderer("task-result", rendererTaskResult);
   pi.registerMessageRenderer("task-question", rendererTaskQuestion);
+
+  // Session events for the task supervisor (auto / relay). The supervisor can
+  // be armed by /auto, /start-task, or /resume-task, so its park/wake and
+  // shutdown handling must not depend on the /auto command ever running.
+  setupTaskSupervisor(pi);
 
   pi.on("before_agent_start", async (event) => {
     if (event.systemPromptOptions.skills?.length) {
