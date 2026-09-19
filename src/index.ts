@@ -1886,6 +1886,24 @@ function taskTitle(title?: string): string {
   return title || "untitled";
 }
 
+/**
+ * Rewrite `/skill:name` refs in a prompt to the referenced SKILL.md path, and
+ * collect the names that resolve to nothing.
+ *
+ * The name pattern needs at least two characters (`[a-z0-9]`, single hyphens as
+ * separators) and must end at a name boundary: a longer token is either a whole
+ * name or no ref at all, so `/skill:ab--c` is left alone instead of being
+ * rewritten into a path with a `--c` tail glued to it. A one-character ref such
+ * as `/skill:a` is not matched, and is not reported either.
+ *
+ * Refs inside a fence are documentation, not refs (see splitFencedSegments).
+ *
+ * Unresolved names are returned to the caller and warned about on the mainline:
+ * the mainline is still the active context and can fix the ref, and the token
+ * stays in the delivered prompt as written. A ref inside an inlined role skill
+ * is the opposite case — the branch never sees a mainline warning — so
+ * inlineRoleSkills appends a Note to the delivered prompt for it instead.
+ */
 function resolveSkillRefs(prompt: string): ResolveResult {
   const unresolvedSet = new Set<string>();
   const resolved: Skill[] = [];
@@ -1895,7 +1913,7 @@ function resolveSkillRefs(prompt: string): ResolveResult {
   }
 
   const rewriteSegment = (segment: string): string =>
-    segment.replace(/\/skill:([a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9])/g, (match, name) => {
+    segment.replace(/\/skill:([a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9])(?![\w-])/g, (match, name) => {
       const skill = byName.get(name) ?? ownSkillByName(name);
       if (skill) {
         if (!resolved.some((s) => s.name === skill.name)) {
@@ -1925,8 +1943,8 @@ function resolveSkillRefs(prompt: string): ResolveResult {
  * left alone.
  *
  * - A fence is opened by a line whose first non-whitespace characters are a run
- *   of 3+ backticks or 3+ tildes. Leading whitespace is allowed, so an indented
- *   code sample counts as fenced too.
+ *   of 3+ backticks or 3+ tildes. Leading spaces and tabs are allowed, so an
+ *   indented code sample counts as fenced too.
  * - It is closed by a line that *starts* with the same character in an equally
  *   long or longer run, whatever follows that run — a stray info string on the
  *   closing line counts as a close.

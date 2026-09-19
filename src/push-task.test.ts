@@ -164,6 +164,37 @@ describe("push-task skill resolution", () => {
     }
   });
 
+  it("does not partially resolve a longer /skill: token", async () => {
+    const h = await TestHarness.create();
+    h.llm.onPrompt(
+      "work",
+      pushTask(
+        "partial token",
+        "Keep /skill:tdd--x as written. Use /skill:tdd, /skill:tdd. (/skill:tdd) `/skill:tdd` /skill:tdd?",
+      ),
+    );
+    try {
+      setSkills(MOCK_SKILLS);
+      await h.prompt("work");
+
+      // The name pattern cannot reach across `--`, and the boundary assertion
+      // stops it from matching the `tdd` prefix inside a longer token: the
+      // token is left alone rather than rewritten into a path with a `--x`
+      // tail glued to it. Trailing punctuation after a whole name is not a
+      // token boundary, so those refs still resolve.
+      h.assertSessionContains(
+        task(
+          "partial token",
+          "Keep /skill:tdd--x as written. Use /dev/null/skills/tdd/SKILL.md, /dev/null/skills/tdd/SKILL.md. (/dev/null/skills/tdd/SKILL.md) `/dev/null/skills/tdd/SKILL.md` /dev/null/skills/tdd/SKILL.md?",
+        ),
+      );
+      // Nothing was queued as unresolved, so no warning is emitted either.
+      h.assertLastNotification("Task stored. Start it with `/start-task` or `/auto`.");
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("resolves the task role skills referenced by the guidelines", async () => {
     const h = await TestHarness.create();
     h.llm.onPrompt(
