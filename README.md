@@ -77,7 +77,7 @@ The upstream-sync updater has been removed entirely; all Superpowers-derived ski
 
 Remaining skills:
 
-- `task-implement`, `task-research`, `task-review` — task role skills inlined by `push-task` (see the `/skill:` guidelines on the `push-task` tool)
+- `task-implement`, `task-research`, `task-review` — task role skills inlined by `push-task` (see [`/skill:` references in task prompts](#skill-references-in-task-prompts))
 
 ## Tools and commands reference
 
@@ -115,6 +115,28 @@ The model is prompted to split work into tasks (one goal per task) and to pick o
 - **review** (fresh by default; fork when the review target exists only in the discussion) — independent review of code or a plan without author bias; reports findings with `file:line` and a verdict.
 - **research** (always fresh) — self-contained investigation; the report is the only deliverable that returns to the mainline.
 - **implement** (fork by default; fresh when the plan fits in the prompt and the mainline context is long) — builds from the plan just discussed; reports the change list, verification, and deviations.
+
+### `/skill:` references in task prompts
+
+A `/skill:<name>` token in a task `prompt` is resolved when the task is pushed: the token is rewritten to the skill's absolute `SKILL.md` path in the stored prompt, and the file's content is inlined into the branch's first message under a `==== Task role skill: <name> ====` header. This is deterministic — the branch receives the skill's contract without having to find and read it — and it applies to fresh and forked tasks alike. Any resolvable skill can be seeded this way; it is not limited to the three task roles.
+
+- **Name syntax** — lowercase letters and digits, at least two characters, single hyphens as separators; the match must end at a name boundary, so a longer token such as `/skill:ab--c` is left untouched instead of being rewritten into a path with a tail glued to it. A one-character ref such as `/skill:a` is not recognised, and not reported either.
+- **Fenced code blocks are documentation, not refs** — a `/skill:` token inside a fence is neither rewritten nor inlined nor noted. This is how a role card can mention a skill by name, or show an example, without seeding it; a bare skill name without the `/skill:` prefix is never a ref at all.
+- **Resolution is transitive** — a role skill may reference further skills, and their bodies are inlined as additional sections, up to `MAX_INLINED_ROLE_SKILLS = 4`; a skill referenced several times is inlined once.
+- **Paths survive nested refs** — Pi expands `/skill:` in user input only, never inside a delivered prompt, so inlined bodies carry already-rewritten absolute paths.
+
+Whatever could not be inlined is reported in the delivered prompt — nothing is dropped silently:
+
+| Situation                               | Trailing note in the branch prompt                                                      |
+| --------------------------------------- | --------------------------------------------------------------------------------------- |
+| Nested ref that resolves to nothing     | `Note: /skill:<name> (referenced by <referrer>) was not found.`                         |
+| Resolved, but its `SKILL.md` unreadable | `Note: /skill:<name> could not be read (<path>).`                                       |
+| Left over by the inlining cap           | `Note: /skill:<name> was not inlined (MAX_INLINED_ROLE_SKILLS=4 reached); read <path>.` |
+
+Two asymmetries are deliberate:
+
+- A **top-level** ref that resolves to nothing is reported to the **mainline** at push time (`Warning: /skill:<name> were not resolved.`) and stays in the stored prompt as a literal token. The author is still here and can fix it, so the branch gets no note for it.
+- A resolved ref whose file vanished since push falls back to the extension's own bundled `skills/<name>/SKILL.md`; only if both fail is it unreadable — and then the path reference already in the prompt lets the branch read the file itself.
 
 ### `resume-task` tool
 
