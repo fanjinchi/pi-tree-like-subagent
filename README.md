@@ -77,7 +77,7 @@ The upstream-sync updater has been removed entirely; all Superpowers-derived ski
 
 Remaining skills:
 
-- `task-implement`, `task-research`, `task-review` — task role skills inlined by `push-task` (see `/skill:` docs in the tool description)
+- `task-implement`, `task-research`, `task-review` — task role skills inlined by `push-task` (see the `/skill:` guidelines on the `push-task` tool)
 
 ## Tools and commands reference
 
@@ -110,7 +110,7 @@ Tasks queue in enqueue order (oldest first): `/start-task`, `/discard-task`, and
 
 With `fork: true` the task starts **from the current context** instead: `/start-task` does not navigate away, it forks a branch right at the current leaf. Use this for implementation tasks whose prompt depends on the discussion you just had — the fork prompt may reference the current conversation ("the plan above") instead of repeating it. Fresh-task prompts must stay fully self-contained.
 
-The model is prompted to split work into tasks (one goal per task) and to pick one of three task roles per task, referenced in the prompt as `/skill:task-review`, `/skill:task-research`, or `/skill:task-implement`. When the task starts, each referenced role skill's `SKILL.md` is inlined into the branch's first message (deterministic loading — no dependence on the model reading file paths), shaping how the branch runs and reports:
+The model is prompted to split work into tasks (one goal per task) and to pick one of three task roles per task, referenced in the prompt as `/skill:task-review`, `/skill:task-research`, or `/skill:task-implement`. When the task starts, each referenced role skill's `SKILL.md` is inlined into the branch's first message (deterministic loading — no dependence on the model reading file paths; any other resolvable skill can be seeded the same way, with a `/skill:<name>` token in the task prompt), shaping how the branch runs and reports:
 
 - **review** (fresh by default; fork when the review target exists only in the discussion) — independent review of code or a plan without author bias; reports findings with `file:line` and a verdict.
 - **research** (always fresh) — self-contained investigation; the report is the only deliverable that returns to the mainline.
