@@ -716,6 +716,217 @@ describe("transitive role skill resolution", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("treats a longer closing run as a fence close", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-fence-long-close-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\n```text\n/skill:long-doc\n`````\n\nLive ref: /skill:long-live.\n";
+      const fixtures = await writeSkills(root, {
+        "long-a": aBody,
+        "long-doc": "# Fenced doc\n",
+        "long-live": "# Live\n",
+      });
+      const livePath = fixtures[2].filePath;
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("longer close", "LONG-TASK: apply /skill:long-a."),
+      );
+      h.llm.onPrompt("LONG-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      // A 5-backtick run closes a 3-backtick opener, so the mention below it
+      // is a live ref — while the fenced span (opener, body, closing run)
+      // survives byte-identical.
+      assert.ok(
+        delivered.includes(
+          `==== Task role skill: long-a ====\n${aBody.replace("/skill:long-live", livePath)}`,
+        ),
+        delivered,
+      );
+      assert.ok(!delivered.includes("==== Task role skill: long-doc ===="), delivered);
+      assert.ok(!delivered.includes(fixtures[1].filePath), delivered);
+      assert.ok(!delivered.includes("\nNote: "), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat a shorter closing run as a fence close", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-fence-short-close-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody =
+        "# A\n\n````text\n/skill:short-doc\n```\n/skill:short-doc-2\n````\n\nLive ref: /skill:short-live.\n";
+      const fixtures = await writeSkills(root, {
+        "short-a": aBody,
+        "short-doc": "# Fenced doc\n",
+        "short-doc-2": "# Also fenced doc\n",
+        "short-live": "# Live\n",
+      });
+      const livePath = fixtures[3].filePath;
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("shorter close", "SHORT-TASK: apply /skill:short-a."),
+      );
+      h.llm.onPrompt("SHORT-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      // A 3-backtick line cannot close a 4-backtick opener: it is fenced
+      // content, so the mention below it stays documentation too.
+      assert.ok(
+        delivered.includes(
+          `==== Task role skill: short-a ====\n${aBody.replace("/skill:short-live", livePath)}`,
+        ),
+        delivered,
+      );
+      assert.ok(!delivered.includes("==== Task role skill: short-doc ===="), delivered);
+      assert.ok(!delivered.includes("==== Task role skill: short-doc-2 ===="), delivered);
+      assert.ok(!delivered.includes(fixtures[1].filePath), delivered);
+      assert.ok(!delivered.includes(fixtures[2].filePath), delivered);
+      assert.ok(!delivered.includes("\nNote: "), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a tilde fence independently of backticks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-fence-tilde-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody =
+        "# A\n\n~~~text\n/skill:tilde-doc\n```\n/skill:tilde-doc-2\n~~~\n\nLive ref: /skill:tilde-live.\n";
+      const fixtures = await writeSkills(root, {
+        "tilde-a": aBody,
+        "tilde-doc": "# Fenced doc\n",
+        "tilde-doc-2": "# Also fenced doc\n",
+        "tilde-live": "# Live\n",
+      });
+      const livePath = fixtures[3].filePath;
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("tilde fence", "TILDE-TASK: apply /skill:tilde-a."),
+      );
+      h.llm.onPrompt("TILDE-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      // The tilde block runs to its own closer: the backtick line inside it is
+      // content, not a close, so neither mention in the block is a ref — and
+      // the mention below the block is still rewritten.
+      assert.ok(
+        delivered.includes(
+          `==== Task role skill: tilde-a ====\n${aBody.replace("/skill:tilde-live", livePath)}`,
+        ),
+        delivered,
+      );
+      assert.ok(!delivered.includes("==== Task role skill: tilde-doc ===="), delivered);
+      assert.ok(!delivered.includes("==== Task role skill: tilde-doc-2 ===="), delivered);
+      assert.ok(!delivered.includes(fixtures[1].filePath), delivered);
+      assert.ok(!delivered.includes(fixtures[2].filePath), delivered);
+      assert.ok(!delivered.includes("\nNote: "), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats an unclosed fence as reaching the end of the text", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-fence-eof-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\nLive ref: /skill:eof-live.\n\n```text\n/skill:eof-doc\nEOF-A-END.\n";
+      const fixtures = await writeSkills(root, {
+        "eof-a": aBody,
+        "eof-doc": "# Fenced doc\n",
+        "eof-live": "# Live\n",
+      });
+      const livePath = fixtures[2].filePath;
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("unclosed fence", "EOF-TASK: apply /skill:eof-a."),
+      );
+      h.llm.onPrompt("EOF-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      // Nothing closes the fence, so the mention after the opener stays
+      // documentation while the mention above it is a live ref.
+      assert.ok(
+        delivered.includes(
+          `==== Task role skill: eof-a ====\n${aBody.replace("/skill:eof-live", livePath)}`,
+        ),
+        delivered,
+      );
+      assert.ok(!delivered.includes("==== Task role skill: eof-doc ===="), delivered);
+      assert.ok(!delivered.includes(fixtures[1].filePath), delivered);
+      assert.ok(!delivered.includes("\nNote: "), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a missing ref once, naming the first referrer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-missing-ref-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\nUse /skill:ghost-shared here.\n";
+      const bBody = "# B\n\nSee /skill:ghost-shared too.\n";
+      const fixtures = await writeSkills(root, { "missing-a": aBody, "missing-b": bBody });
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("shared ghost", "GHOST-TASK: apply /skill:missing-a and /skill:missing-b."),
+      );
+      h.llm.onPrompt("GHOST-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      assert.ok(delivered.includes(`==== Task role skill: missing-a ====\n${aBody}`), delivered);
+      assert.ok(delivered.includes(`==== Task role skill: missing-b ====\n${bBody}`), delivered);
+      // Both inlined cards reference the same unknown name: exactly one Note,
+      // naming the card that referenced it first.
+      assert.strictEqual(count(delivered, "Note: /skill:ghost-shared"), 1, delivered);
+      assert.strictEqual(count(delivered, "was not found"), 1, delivered);
+      assert.ok(
+        delivered.includes("Note: /skill:ghost-shared (referenced by missing-a) was not found."),
+        delivered,
+      );
+      assert.ok(!delivered.includes("referenced by missing-b"), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 // Actual file existence is not required — resolution is pure string replacement.
 // Mock skill paths are project-relative for the test environment.
