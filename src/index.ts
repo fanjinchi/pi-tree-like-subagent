@@ -29,6 +29,13 @@ import { Type, type Static } from "typebox";
 
 import { renderTextContent, taskResultTextContent } from "./text-content.js";
 
+/**
+ * Cap on role-skill sections inlined into one delivered prompt. Resolution is
+ * transitive (a role skill may reference further role skills), so a heavily
+ * cross-referencing skill graph must not balloon the branch prompt.
+ */
+export const MAX_INLINED_ROLE_SKILLS = 4;
+
 export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
   return defineTool({
     name: "push-task",
@@ -687,6 +694,147 @@ type TaskAskAPI = Pick<ExtensionAPI, "appendEntry">;
 type TaskStatusContext = Pick<ExtensionCommandContext, "hasUI" | "sessionManager" | "ui">;
 
 /**
+ * Shared call renderer for the task tools: a styled header followed by the
+ * (collapsed, unless expanded) body lines.
+ */
+function renderCollapsibleToolCall(
+  header: string,
+  body: string,
+  theme: Theme,
+  expanded?: boolean,
+): Text {
+  const bodyLines = body.split("\n");
+  // Collapsed call rendering shows the first few body lines only.
+  const maxLines = expanded ? bodyLines.length : 7;
+  const displayLines = bodyLines.slice(0, maxLines).map((l) => theme.fg("dim", l.trimEnd() || " "));
+
+  if (!expanded && bodyLines.length > maxLines) {
+    const moreLines = bodyLines.length - maxLines;
+    displayLines.push(
+      theme.fg(
+        "muted",
+        `... (${moreLines} more lines, ${bodyLines.length} total, ctrl+o to expand)`,
+      ),
+    );
+  }
+
+  return new Text([header, ...displayLines].join("\n"), 0, 0);
+}
+
+async function discardTask(
+  pi: TaskCommandAPI,
+  ctx: ExtensionCommandContext,
+): Promise<TaskActionResult> {
+  const activeTask = pendingTask(ctx.sessionManager);
+  if (!activeTask) {
+    ctx.ui.notify("No pending task to discard.", "warning");
+    return;
+  }
+
+  pi.appendEntry(TASK_DONE_ENTRY_TYPE, { taskEntryId: activeTask.id });
+  ctx.ui.notify("Task discarded.", "info");
+
+  refreshTaskStatus(ctx);
+}
+
+async function abortTask(
+  pi: TaskCommandAPI,
+  ctx: ExtensionCommandContext,
+): Promise<TaskActionResult> {
+  const taskStart = currentTask(ctx.sessionManager);
+  if (!taskStart) {
+    ctx.ui.notify("Not inside task, nothing to abort.", "warning");
+    return;
+  }
+
+  const branchLeafId = ctx.sessionManager.getLeafId()!;
+
+  const result = await ctx.navigateTree(taskStart.data.returnTo, {
+    summarize: false,
+  });
+  if (result.cancelled) return "cancelled";
+
+  // Abort produces no result but stays resumable: the task entry is not
+  // consumed, keeping "abort = task pending again".
+  pi.appendEntry(TASK_SUSPENDED_ENTRY_TYPE, {
+    title: taskMarkerTitle(taskStart.data.title),
+    branchLeafId,
+    reason: "abort",
+    ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+  });
+  syncTaskToolVisibility(pi, ctx.sessionManager);
+
+  ctx.ui.notify("Task aborted. Branch abandoned without summary.", "info");
+
+  await restorePreviousModel(pi, taskStart, ctx);
+
+  refreshTaskStatus(ctx);
+}
+
+/**
+ * Autocompletion for /start-task model argument, mirroring the /model
+ * command: label is the model id, description is the provider, and value
+ * is provider/id (what gets typed and resolved). Returns up to 20 items.
+ */
+function getModelCompletions(argumentPrefix: string, registry: ModelRegistry): AutocompleteItem[] {
+  return matchModels(argumentPrefix, registry)
+    .slice(0, 20)
+    .map((m) => ({
+      value: `${m.provider}/${m.id}`,
+      label: m.id,
+      description: m.provider,
+    }));
+}
+
+/**
+ * Tool order captured at the first visibility sync. Pi rebuilds the system
+ * prompt by concatenating promptGuidelines in the order of the array passed
+ * to setActiveTools, so naive append would create a third system-prompt
+ * variant and break prefix-cache reuse. Filtering subsets of this canonical
+ * order keeps exactly two byte-stable prompts (mainline / task branch).
+ */
+let canonicalToolOrder: string[] | undefined;
+
+const pushTaskParameters = Type.Object({
+  title: Type.String({
+    description: "Short task title shown in status, results, and tool rendering.",
+  }),
+  prompt: Type.String({
+    description:
+      "Full prompt for the task, including all context and instructions. Must be self-contained for fresh tasks; fork tasks may reference the current conversation. Reference the task role skill in the prompt (/skill:task-review, /skill:task-research, /skill:task-implement).",
+  }),
+  fork: Type.Optional(
+    Type.Boolean({
+      description:
+        "Start the task from the current context instead of a fresh one. Use for implementation tasks whose prompt depends on the current discussion.",
+    }),
+  ),
+});
+
+const resumeTaskParameters = Type.Object({
+  title: Type.Optional(
+    Type.String({
+      description:
+        "Title of the suspended task to resume. Defaults to the most recently suspended task.",
+    }),
+  ),
+  message: Type.String({
+    description:
+      "Message injected into the task branch on resume, e.g. review findings or the answer to its question.",
+  }),
+});
+
+const taskAskParameters = Type.Object({
+  question: Type.String({
+    description: "Question for the mainline orchestrator.",
+  }),
+});
+
+let skillsExternallySet = false;
+
+let modelRegistry: ModelRegistry | undefined;
+
+/**
  * Arm (or upgrade) the per-session supervisor loop. Navigation is only
  * possible from a command context (navigateTree / waitForIdle exist on
  * ExtensionCommandContext, not on event or tool contexts), which is why the
@@ -903,34 +1051,6 @@ function settleAgentStartWaiter(state: TaskSupervisorState, started: boolean): v
   waiter.resolve(started);
 }
 
-/**
- * Shared call renderer for the task tools: a styled header followed by the
- * (collapsed, unless expanded) body lines.
- */
-function renderCollapsibleToolCall(
-  header: string,
-  body: string,
-  theme: Theme,
-  expanded?: boolean,
-): Text {
-  const bodyLines = body.split("\n");
-  // Collapsed call rendering shows the first few body lines only.
-  const maxLines = expanded ? bodyLines.length : 7;
-  const displayLines = bodyLines.slice(0, maxLines).map((l) => theme.fg("dim", l.trimEnd() || " "));
-
-  if (!expanded && bodyLines.length > maxLines) {
-    const moreLines = bodyLines.length - maxLines;
-    displayLines.push(
-      theme.fg(
-        "muted",
-        `... (${moreLines} more lines, ${bodyLines.length} total, ctrl+o to expand)`,
-      ),
-    );
-  }
-
-  return new Text([header, ...displayLines].join("\n"), 0, 0);
-}
-
 function lastAssistantWasAborted(session: ReadonlySessionLike): boolean {
   const branch = session.getBranch();
   const last = branch[branch.length - 1];
@@ -1047,22 +1167,6 @@ async function startTask(
   return "started";
 }
 
-async function discardTask(
-  pi: TaskCommandAPI,
-  ctx: ExtensionCommandContext,
-): Promise<TaskActionResult> {
-  const activeTask = pendingTask(ctx.sessionManager);
-  if (!activeTask) {
-    ctx.ui.notify("No pending task to discard.", "warning");
-    return;
-  }
-
-  pi.appendEntry(TASK_DONE_ENTRY_TYPE, { taskEntryId: activeTask.id });
-  ctx.ui.notify("Task discarded.", "info");
-
-  refreshTaskStatus(ctx);
-}
-
 async function finishTask(
   pi: TaskCommandAPI,
   ctx: ExtensionCommandContext,
@@ -1161,40 +1265,6 @@ function lastAssistantInterrupted(session: ReadonlySessionLike): boolean {
     lastAssistant !== undefined &&
     (lastAssistant.message.stopReason === "aborted" || lastAssistant.message.stopReason === "error")
   );
-}
-
-async function abortTask(
-  pi: TaskCommandAPI,
-  ctx: ExtensionCommandContext,
-): Promise<TaskActionResult> {
-  const taskStart = currentTask(ctx.sessionManager);
-  if (!taskStart) {
-    ctx.ui.notify("Not inside task, nothing to abort.", "warning");
-    return;
-  }
-
-  const branchLeafId = ctx.sessionManager.getLeafId()!;
-
-  const result = await ctx.navigateTree(taskStart.data.returnTo, {
-    summarize: false,
-  });
-  if (result.cancelled) return "cancelled";
-
-  // Abort produces no result but stays resumable: the task entry is not
-  // consumed, keeping "abort = task pending again".
-  pi.appendEntry(TASK_SUSPENDED_ENTRY_TYPE, {
-    title: taskMarkerTitle(taskStart.data.title),
-    branchLeafId,
-    reason: "abort",
-    ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
-  });
-  syncTaskToolVisibility(pi, ctx.sessionManager);
-
-  ctx.ui.notify("Task aborted. Branch abandoned without summary.", "info");
-
-  await restorePreviousModel(pi, taskStart, ctx);
-
-  refreshTaskStatus(ctx);
 }
 
 /**
@@ -1824,9 +1894,8 @@ function resolveSkillRefs(prompt: string): ResolveResult {
     byName.set(skill.name, skill);
   }
 
-  const rewritten = prompt.replace(
-    /\/skill:([a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9])/g,
-    (match, name) => {
+  const rewriteSegment = (segment: string): string =>
+    segment.replace(/\/skill:([a-z0-9](?:[a-z0-9]|-(?!-))*[a-z0-9])/g, (match, name) => {
       const skill = byName.get(name) ?? ownSkillByName(name);
       if (skill) {
         if (!resolved.some((s) => s.name === skill.name)) {
@@ -1836,10 +1905,53 @@ function resolveSkillRefs(prompt: string): ResolveResult {
       }
       unresolvedSet.add(name);
       return match;
-    },
-  );
+    });
+
+  const rewritten = splitFencedSegments(prompt)
+    .map((segment) => (segment.fenced ? segment.text : rewriteSegment(segment.text)))
+    .join("");
 
   return { rewritten, unresolved: [...unresolvedSet], resolved };
+}
+
+/**
+ * Split text into contiguous segments, flagging the fenced ones. A `/skill:`
+ * mention inside a fence is documentation, not a ref, so only unfenced
+ * segments are rewritten. A fence is opened by a line starting with 3+
+ * backticks or 3+ tildes and closed by the same character with at least the
+ * same run length; an unclosed fence reaches the end of the text.
+ */
+function splitFencedSegments(text: string): Array<{ text: string; fenced: boolean }> {
+  const segments: Array<{ text: string; fenced: boolean }> = [];
+  let buffer = "";
+  let open: { char: string; length: number } | undefined;
+  const flush = (): void => {
+    if (buffer.length > 0) {
+      segments.push({ text: buffer, fenced: open !== undefined });
+    }
+    buffer = "";
+  };
+
+  for (const line of text.split(/(?<=\n)/)) {
+    const marker = /^[ \t]*(`{3,}|~{3,})/.exec(line)?.[1];
+    if (open) {
+      buffer += line;
+      if (marker && marker[0] === open.char && marker.length >= open.length) {
+        flush();
+        open = undefined;
+      }
+      continue;
+    }
+    if (marker) {
+      flush();
+      open = { char: marker[0], length: marker.length };
+      buffer = line;
+      continue;
+    }
+    buffer += line;
+  }
+  flush();
+  return segments;
 }
 
 interface ResolveResult {
@@ -1849,17 +1961,11 @@ interface ResolveResult {
 }
 
 /**
- * Cap on role-skill sections inlined into one delivered prompt. Resolution is
- * transitive (a role skill may reference further role skills), so a heavily
- * cross-referencing skill graph must not balloon the branch prompt.
- */
-export const MAX_INLINED_ROLE_SKILLS = 4;
-
-/**
  * Append the resolved role skills' SKILL.md content to the delivered prompt.
  * Deterministic role loading: the task branch receives the full role contract
  * inline instead of depending on the model reading the referenced file paths.
- * Paths that fail to read fall back to the path reference already in the prompt.
+ * Paths that fail to read fall back to the path reference already in the prompt
+ * and add a trailing Note, so a ref that never got inlined is never silent.
  *
  * Resolution is transitive: a role skill may itself reference further role
  * skills with `/skill:name`, and those bodies are inlined as well. The inlined
@@ -1876,13 +1982,24 @@ async function inlineRoleSkills(prompt: string, refs?: TaskData["skills"]): Prom
   // the mainline is no longer the active context. Keyed by name so a ref that
   // several skills point at is reported once, naming the first referrer.
   const missing = new Map<string, string>();
+  // A ref that resolved but whose SKILL.md could not be read keeps its
+  // absolute path in the prompt, so the branch can read it on its own.
+  const unreadable: Array<{ name: string; filePath: string }> = [];
   const queue: Array<{ name: string; filePath: string }> = [...refs];
-  while (queue.length > 0 && sections.length < MAX_INLINED_ROLE_SKILLS) {
+  let capped = false;
+  while (queue.length > 0) {
+    if (sections.length >= MAX_INLINED_ROLE_SKILLS) {
+      capped = true;
+      break;
+    }
     const ref = queue.shift();
     if (!ref || seen.has(ref.name)) continue;
     seen.add(ref.name);
     const content = await readRoleSkill(ref);
-    if (content === undefined) continue;
+    if (content === undefined) {
+      unreadable.push({ name: ref.name, filePath: ref.filePath });
+      continue;
+    }
     const { rewritten, resolved, unresolved } = resolveSkillRefs(content);
     for (const name of unresolved) {
       if (!missing.has(name)) missing.set(name, ref.name);
@@ -1892,12 +2009,35 @@ async function inlineRoleSkills(prompt: string, refs?: TaskData["skills"]): Prom
       if (!seen.has(nested.name)) queue.push(nested);
     }
   }
-  if (sections.length === 0) return prompt;
-  const notes = [...missing].map(
-    ([name, referencedBy]) => `Note: /skill:${name} (referenced by ${referencedBy}) was not found.`,
-  );
-  const inlined = `${prompt}\n\n${sections.join("\n\n")}`;
-  return notes.length > 0 ? `${inlined}\n\n${notes.join("\n")}` : inlined;
+  // Refs left queued by the cap: dedupe (the same ref can be queued by two
+  // referrers) and drop names that were inlined before the cap was reached.
+  const dropped: Array<{ name: string; filePath: string }> = [];
+  if (capped) {
+    const reported = new Set<string>();
+    for (const ref of queue) {
+      if (seen.has(ref.name) || reported.has(ref.name)) continue;
+      reported.add(ref.name);
+      dropped.push(ref);
+    }
+  }
+  const notes = [
+    ...[...missing].map(
+      ([name, referencedBy]) =>
+        `Note: /skill:${name} (referenced by ${referencedBy}) was not found.`,
+    ),
+    ...unreadable.map(
+      ({ name, filePath }) => `Note: /skill:${name} could not be read (${filePath}).`,
+    ),
+    ...dropped.map(
+      ({ name, filePath }) =>
+        `Note: /skill:${name} was not inlined (MAX_INLINED_ROLE_SKILLS=${MAX_INLINED_ROLE_SKILLS} reached); read ${filePath}.`,
+    ),
+  ];
+  if (sections.length === 0 && notes.length === 0) return prompt;
+  const parts = [prompt];
+  if (sections.length > 0) parts.push(sections.join("\n\n"));
+  if (notes.length > 0) parts.push(notes.join("\n"));
+  return parts.join("\n\n");
 }
 
 interface TaskData {
@@ -1975,21 +2115,6 @@ function resolveModelPattern(
   if (matches.length === 0) return null;
   if (matches.length > 1) return "ambiguous";
   return matches[0];
-}
-
-/**
- * Autocompletion for /start-task model argument, mirroring the /model
- * command: label is the model id, description is the provider, and value
- * is provider/id (what gets typed and resolved). Returns up to 20 items.
- */
-function getModelCompletions(argumentPrefix: string, registry: ModelRegistry): AutocompleteItem[] {
-  return matchModels(argumentPrefix, registry)
-    .slice(0, 20)
-    .map((m) => ({
-      value: `${m.provider}/${m.id}`,
-      label: m.id,
-      description: m.provider,
-    }));
 }
 
 /** Case-insensitive substring match of `pattern` against each available model's id, name, or provider/id. */
@@ -2087,54 +2212,6 @@ function flushParkedWaiters(sessionManager: object): void {
 // process (the test harness runs many), so module-level globals would leak.
 const supervisorStates = new WeakMap<object, TaskSupervisorState>();
 
-/**
- * Tool order captured at the first visibility sync. Pi rebuilds the system
- * prompt by concatenating promptGuidelines in the order of the array passed
- * to setActiveTools, so naive append would create a third system-prompt
- * variant and break prefix-cache reuse. Filtering subsets of this canonical
- * order keeps exactly two byte-stable prompts (mainline / task branch).
- */
-let canonicalToolOrder: string[] | undefined;
-
-const pushTaskParameters = Type.Object({
-  title: Type.String({
-    description: "Short task title shown in status, results, and tool rendering.",
-  }),
-  prompt: Type.String({
-    description:
-      "Full prompt for the task, including all context and instructions. Must be self-contained for fresh tasks; fork tasks may reference the current conversation. Reference the task role skill in the prompt (/skill:task-review, /skill:task-research, /skill:task-implement).",
-  }),
-  fork: Type.Optional(
-    Type.Boolean({
-      description:
-        "Start the task from the current context instead of a fresh one. Use for implementation tasks whose prompt depends on the current discussion.",
-    }),
-  ),
-});
-
-const resumeTaskParameters = Type.Object({
-  title: Type.Optional(
-    Type.String({
-      description:
-        "Title of the suspended task to resume. Defaults to the most recently suspended task.",
-    }),
-  ),
-  message: Type.String({
-    description:
-      "Message injected into the task branch on resume, e.g. review findings or the answer to its question.",
-  }),
-});
-
-const taskAskParameters = Type.Object({
-  question: Type.String({
-    description: "Question for the mainline orchestrator.",
-  }),
-});
-
 // ── Skill resolution registry ─────────────────────────────────────
 
 let skills: Skill[] = [];
-
-let skillsExternallySet = false;
-
-let modelRegistry: ModelRegistry | undefined;

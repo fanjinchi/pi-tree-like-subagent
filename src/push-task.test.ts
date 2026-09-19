@@ -465,6 +465,128 @@ describe("transitive role skill resolution", () => {
         !delivered.includes(`==== Task role skill: cap-${MAX_INLINED_ROLE_SKILLS} ====`),
         delivered,
       );
+      // The capped ref is not silent: the branch is told it was dropped and
+      // where to read it. Reported once, even though the queue can hold the
+      // same ref through several referrers.
+      assert.strictEqual(
+        count(
+          delivered,
+          `Note: /skill:cap-${MAX_INLINED_ROLE_SKILLS} was not inlined (MAX_INLINED_ROLE_SKILLS=${MAX_INLINED_ROLE_SKILLS} reached); read ${fixtures[MAX_INLINED_ROLE_SKILLS].filePath}.`,
+        ),
+        1,
+        delivered,
+      );
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports role skills whose SKILL.md cannot be read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-unreadable-skill-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\nDelegate with /skill:gone-nested.\n";
+      const fixtures = await writeSkills(root, { "gone-a": aBody, "gone-nested": "# Gone\n" });
+      // Registered, but never written to disk: the top-level ref itself.
+      const top = fixtureSkill("gone-top", join(root, "gone-top", "SKILL.md"));
+      const nestedPath = fixtures[1].filePath;
+
+      setSkills([...fixtures, top]);
+      // The nested skill's file vanishes between push and start.
+      await rm(nestedPath);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("unreadable roles", "UNREADABLE-TASK: use /skill:gone-top and /skill:gone-a."),
+      );
+      h.llm.onPrompt("UNREADABLE-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      // The readable skill is still inlined and the run continues; each ref
+      // that resolved but could not be read says so, with its path.
+      assert.ok(
+        delivered.includes(
+          `==== Task role skill: gone-a ====\n${aBody.replace("/skill:gone-nested", nestedPath)}`,
+        ),
+        delivered,
+      );
+      assert.ok(
+        delivered.endsWith(
+          `Note: /skill:gone-top could not be read (${top.filePath}).\n` +
+            `Note: /skill:gone-nested could not be read (${nestedPath}).`,
+        ),
+        delivered,
+      );
+      h.assertSessionContains(assistant("Findings: none."));
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a /skill: mention inside a fenced block as documentation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-fenced-skill-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\nSyntax reference:\n\n```text\n/skill:fenced-b\n```\n\nFENCED-A-END.\n";
+      const bBody = "# B\n\nFENCED-B-BODY.\n";
+      const fixtures = await writeSkills(root, { "fenced-a": aBody, "fenced-b": bBody });
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("fenced roles", "FENCED-TASK: apply /skill:fenced-a."),
+      );
+      h.llm.onPrompt("FENCED-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      // The fenced example survives byte-identical, resolves to nothing, and
+      // is not reported: it is documentation, not a ref.
+      assert.ok(delivered.includes(`==== Task role skill: fenced-a ====\n${aBody}`), delivered);
+      assert.ok(!delivered.includes("==== Task role skill: fenced-b ===="), delivered);
+      assert.ok(!delivered.includes(fixtures[1].filePath), delivered);
+      assert.ok(!delivered.includes("\nNote: "), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a fenced /skill: mention in the task prompt untouched", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-fenced-prompt-"));
+    const h = await TestHarness.create();
+    try {
+      const fixtures = await writeSkills(root, {
+        "fence-real": "# Real\n",
+        "fence-doc": "# Doc\n",
+      });
+      const realPath = fixtures[0].filePath;
+      const stored = `FENCE-TASK: use /skill:fence-real.\n\n\`\`\`\n/skill:fence-doc\n\`\`\``;
+
+      setSkills(fixtures);
+      h.llm.onPrompt("main work", responds("working..."), pushTask("fence prompt", stored));
+      h.llm.onPrompt("FENCE-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      // The real ref is rewritten at push time; the fenced one is not a ref.
+      h.assertSessionContains(
+        task("fence prompt", `FENCE-TASK: use ${realPath}.\n\n\`\`\`\n/skill:fence-doc\n\`\`\``),
+      );
+
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      assert.ok(delivered.includes("```\n/skill:fence-doc\n```"), delivered);
+      assert.ok(delivered.includes("==== Task role skill: fence-real ===="), delivered);
+      assert.ok(!delivered.includes("==== Task role skill: fence-doc ===="), delivered);
     } finally {
       h.dispose();
       await rm(root, { recursive: true, force: true });
