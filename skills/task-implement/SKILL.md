@@ -16,7 +16,7 @@ The task prompt names the plan and acceptance criteria. If a step is ambiguous, 
 
 - Follow the plan; keep changes scoped to it. Out-of-plan changes need justification in the report.
 - Verify as you go: type-check and run the relevant tests before finishing.
-- **REQUIRED on unexpected failures:** follow `/skill:systematic-debugging` and find the root cause before patching.
+- **REQUIRED on unexpected failures:** follow `/skill:diagnosing-bugs` and find the root cause before patching.
 
 ## Output format
 
