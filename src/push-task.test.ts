@@ -434,14 +434,16 @@ describe("transitive role skill resolution", () => {
     const root = await mkdtemp(join(tmpdir(), "pi-tree-cap-skill-"));
     const h = await TestHarness.create();
     try {
-      // A five-link chain: each skill references the next one.
-      const bodies: Record<string, string> = {};
-      for (let index = 0; index < MAX_INLINED_ROLE_SKILLS + 1; index += 1) {
-        bodies[`cap-${index}`] =
-          index < MAX_INLINED_ROLE_SKILLS
-            ? `# cap-${index}\n\nNext: /skill:cap-${index + 1}.\n`
-            : `# cap-${index}\n\nLeaf body.\n`;
-      }
+      // A diamond that funnels cap-4 into the queue twice: cap-2 (inlined
+      // third) references it next to cap-3, and cap-3 (inlined fourth)
+      // references it again. The cap is reached before it can be inlined.
+      const bodies: Record<string, string> = {
+        "cap-0": "# cap-0\n\nNext: /skill:cap-1.\n",
+        "cap-1": "# cap-1\n\nNext: /skill:cap-2.\n",
+        "cap-2": "# cap-2\n\nNext: /skill:cap-3 and /skill:cap-4.\n",
+        "cap-3": "# cap-3\n\nBack to /skill:cap-4.\n",
+        "cap-4": "# cap-4\n\nLeaf body.\n",
+      };
       const fixtures = await writeSkills(root, bodies);
 
       setSkills(fixtures);
@@ -476,6 +478,48 @@ describe("transitive role skill resolution", () => {
         1,
         delivered,
       );
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not report a capped ref when the queue empties at the cap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-exact-cap-skill-"));
+    const h = await TestHarness.create();
+    try {
+      // A four-link chain: the queue runs dry on the very section that reaches
+      // MAX_INLINED_ROLE_SKILLS, so nothing was dropped and no Note belongs in
+      // the prompt.
+      const bodies: Record<string, string> = {
+        "exact-0": "# exact-0\n\nNext: /skill:exact-1.\n",
+        "exact-1": "# exact-1\n\nNext: /skill:exact-2.\n",
+        "exact-2": "# exact-2\n\nNext: /skill:exact-3.\n",
+        "exact-3": "# exact-3\n\nLeaf body.\n",
+      };
+      assert.strictEqual(Object.keys(bodies).length, MAX_INLINED_ROLE_SKILLS);
+      const fixtures = await writeSkills(root, bodies);
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("exact cap roles", "EXACT-CAP-TASK: use /skill:exact-0."),
+      );
+      h.llm.onPrompt("EXACT-CAP-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      assert.strictEqual(
+        count(delivered, "==== Task role skill: "),
+        MAX_INLINED_ROLE_SKILLS,
+        delivered,
+      );
+      assert.ok(delivered.includes("==== Task role skill: exact-3 ===="), delivered);
+      assert.strictEqual(count(delivered, "was not inlined"), 0, delivered);
+      assert.ok(!delivered.includes("\nNote: "), delivered);
     } finally {
       h.dispose();
       await rm(root, { recursive: true, force: true });
@@ -552,6 +596,86 @@ describe("transitive role skill resolution", () => {
       // is not reported: it is documentation, not a ref.
       assert.ok(delivered.includes(`==== Task role skill: fenced-a ====\n${aBody}`), delivered);
       assert.ok(!delivered.includes("==== Task role skill: fenced-b ===="), delivered);
+      assert.ok(!delivered.includes(fixtures[1].filePath), delivered);
+      assert.ok(!delivered.includes("\nNote: "), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a closing line with an info string as a fence close", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-fence-close-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\n```text\n/skill:close-doc\n```js\n\nLive ref: /skill:close-live.\n";
+      const fixtures = await writeSkills(root, {
+        "close-a": aBody,
+        "close-doc": "# Fenced doc\n",
+        "close-live": "# Live\n",
+      });
+      const livePath = fixtures[2].filePath;
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("close with info string", "CLOSE-TASK: apply /skill:close-a."),
+      );
+      h.llm.onPrompt("CLOSE-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      // ```` ```js ```` closes the fence (the info string is ignored), so the
+      // mention below it is a live ref and is rewritten — while the fenced span
+      // itself (opener, body, closing line) survives byte-identical.
+      assert.ok(
+        delivered.includes(
+          `==== Task role skill: close-a ====\n${aBody.replace("/skill:close-live", livePath)}`,
+        ),
+        delivered,
+      );
+      // The mention inside the fence stays documentation: not inlined, not
+      // rewritten, not reported as missing.
+      assert.ok(!delivered.includes("==== Task role skill: close-doc ===="), delivered);
+      assert.ok(!delivered.includes(fixtures[1].filePath), delivered);
+      assert.ok(!delivered.includes("\nNote: "), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats an indented fence opener as a fence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-fence-indent-"));
+    const h = await TestHarness.create();
+    try {
+      // Deliberately not CommonMark: 4 spaces would make this an indented code
+      // block, and the stricter indent rule would leave the mention inside it
+      // unprotected.
+      const aBody =
+        "# A\n\nIndented sample:\n\n    ```text\n    /skill:indent-doc\n    ```\n\nINDENT-A-END.\n";
+      const fixtures = await writeSkills(root, {
+        "indent-a": aBody,
+        "indent-doc": "# Indented doc\n",
+      });
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("indented fence", "INDENT-TASK: apply /skill:indent-a."),
+      );
+      h.llm.onPrompt("INDENT-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      assert.ok(delivered.includes(`==== Task role skill: indent-a ====\n${aBody}`), delivered);
+      assert.ok(!delivered.includes("==== Task role skill: indent-doc ===="), delivered);
       assert.ok(!delivered.includes(fixtures[1].filePath), delivered);
       assert.ok(!delivered.includes("\nNote: "), delivered);
     } finally {

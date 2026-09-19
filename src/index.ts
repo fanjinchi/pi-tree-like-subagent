@@ -1917,9 +1917,24 @@ function resolveSkillRefs(prompt: string): ResolveResult {
 /**
  * Split text into contiguous segments, flagging the fenced ones. A `/skill:`
  * mention inside a fence is documentation, not a ref, so only unfenced
- * segments are rewritten. A fence is opened by a line starting with 3+
- * backticks or 3+ tildes and closed by the same character with at least the
- * same run length; an unclosed fence reaches the end of the text.
+ * segments are rewritten.
+ *
+ * These rules are prompt semantics, deliberately not CommonMark: the goal is to
+ * skip anything that reads as a code sample, and CommonMark's stricter indent
+ * rule would only lose mentions in indented code blocks that should have been
+ * left alone.
+ *
+ * - A fence is opened by a line whose first non-whitespace characters are a run
+ *   of 3+ backticks or 3+ tildes. Leading whitespace is allowed, so an indented
+ *   code sample counts as fenced too.
+ * - It is closed by a line that *starts* with the same character in an equally
+ *   long or longer run, whatever follows that run — a stray info string on the
+ *   closing line counts as a close.
+ * - An unclosed fence reaches the end of the text.
+ * - Failure direction: a fenced segment is neither rewritten nor reported as
+ *   unresolved (no Note is appended), so an over-eager fence only falls back to
+ *   leaving the text alone, while a fence missed would silently drop a live ref.
+ *   Hence the tolerance: err on the side of fencing.
  */
 function splitFencedSegments(text: string): Array<{ text: string; fenced: boolean }> {
   const segments: Array<{ text: string; fenced: boolean }> = [];
