@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   assistant,
@@ -14,7 +14,7 @@ import {
   user,
 } from "./test-helpers/index.js";
 
-import { findOwnSkillFile, setSkills } from "./index.js";
+import { findOwnSkillFile, MAX_INLINED_ROLE_SKILLS, setSkills } from "./index.js";
 
 import type { Skill } from "@earendil-works/pi-coding-agent";
 
@@ -217,10 +217,13 @@ describe("push-task skill resolution", () => {
       await h.prompt("main work");
       await h.prompt("/start-task");
 
-      // The delivered prompt carries the role skill content inline.
+      // The delivered prompt carries the role skill content inline. The card's
+      // own frontmatter mention of /skill:task-review is rewritten to the path
+      // as well, and the OCR skill it references is neither registered nor
+      // bundled here, so the branch is told about that unresolved nested ref.
       h.assertSessionContains(
         user(
-          `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent}`,
+          `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent.replaceAll("/skill:task-review", skillPath)}\n\nNote: /skill:open-code-review-delegate (referenced by task-review) was not found.`,
         ),
         assistant("Findings: none."),
       );
@@ -269,10 +272,11 @@ describe("push-task skill resolution", () => {
       await h.prompt("/start-task");
 
       // The delivered prompt carries the role skill content inline, resolved
-      // from the extension's own skills directory.
+      // from the extension's own skills directory. The nested OCR ref stays
+      // unresolved here (no registry, no bundled copy) and is reported.
       h.assertSessionContains(
         user(
-          `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent}`,
+          `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent.replaceAll("/skill:task-review", skillPath)}\n\nNote: /skill:open-code-review-delegate (referenced by task-review) was not found.`,
         ),
         assistant("Findings: none."),
       );
@@ -285,6 +289,189 @@ describe("push-task skill resolution", () => {
   });
 });
 
+describe("transitive role skill resolution", () => {
+  const fixtureSkill = (name: string, filePath: string): Skill => ({
+    name,
+    description: `${name} test skill`,
+    filePath,
+    baseDir: dirname(filePath),
+    sourceInfo: { path: filePath, source: "project", scope: "project", origin: "package" },
+    disableModelInvocation: true,
+  });
+
+  const count = (text: string, needle: string): number => text.split(needle).length - 1;
+
+  /** Text of the delivered prompt: the last user message the model received. */
+  const deliveredPrompt = (h: TestHarness): string => {
+    const lastUser = [...(h.lastPromptMessages() ?? [])]
+      .reverse()
+      .find((message) => message.role === "user");
+    assert.ok(lastUser, "expected a delivered user prompt");
+    return lastUser.text;
+  };
+
+  /** Write one fixture SKILL.md per entry and return the matching Skill records. */
+  const writeSkills = async (root: string, bodies: Record<string, string>): Promise<Skill[]> => {
+    const written: Skill[] = [];
+    for (const [name, body] of Object.entries(bodies)) {
+      const dir = join(root, name);
+      await mkdir(dir, { recursive: true });
+      const filePath = join(dir, "SKILL.md");
+      await writeFile(filePath, body);
+      written.push(fixtureSkill(name, filePath));
+    }
+    return written;
+  };
+
+  it("inlines a role skill referenced from inside another role skill", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-nested-skill-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\nDelegate the review with /skill:nested-b.\n";
+      const bBody = "# B\n\nNESTED-BODY-B: review each file.\n";
+      const fixtures = await writeSkills(root, { "nested-a": aBody, "nested-b": bBody });
+      const bPath = fixtures[1].filePath;
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("nested role", "NESTED-TASK: review with /skill:nested-a."),
+      );
+      h.llm.onPrompt("NESTED-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      // The nested skill is inlined too, and the inlined copy of A carries the
+      // rewritten path — no dead /skill: token reaches the branch.
+      const delivered = deliveredPrompt(h);
+      assert.ok(
+        delivered.includes(
+          `==== Task role skill: nested-a ====\n${aBody.replace("/skill:nested-b", bPath)}`,
+        ),
+        delivered,
+      );
+      assert.ok(delivered.includes(`==== Task role skill: nested-b ====\n${bBody}`), delivered);
+      assert.ok(!delivered.includes("/skill:nested-b"), delivered);
+      assert.ok(!delivered.includes("was not found"), delivered);
+      h.assertSessionContains(assistant("Findings: none."));
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("inlines each role skill once when two skills reference each other", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-mutual-skill-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\nStart with /skill:mutual-b.\n";
+      const bBody = "# B\n\nBack to /skill:mutual-a.\n";
+      const fixtures = await writeSkills(root, { "mutual-a": aBody, "mutual-b": bBody });
+      const aPath = fixtures[0].filePath;
+      const bPath = fixtures[1].filePath;
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("mutual roles", "MUTUAL-TASK: use /skill:mutual-a."),
+      );
+      h.llm.onPrompt("MUTUAL-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      assert.strictEqual(count(delivered, "==== Task role skill: mutual-a ===="), 1, delivered);
+      assert.strictEqual(count(delivered, "==== Task role skill: mutual-b ===="), 1, delivered);
+      // A's own body was rewritten against its reference to B as well.
+      assert.ok(delivered.includes(aBody.replace("/skill:mutual-b", bPath)), delivered);
+      // B's body was rewritten against its own reference to A.
+      assert.ok(delivered.includes(bBody.replace("/skill:mutual-a", aPath)), delivered);
+      assert.ok(!delivered.includes("/skill:mutual-"), delivered);
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a nested ref that resolves to nothing instead of failing the run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-ghost-skill-"));
+    const h = await TestHarness.create();
+    try {
+      const aBody = "# A\n\nDelegate with /skill:ghost-skill.\n";
+      const fixtures = await writeSkills(root, { "ghost-a": aBody });
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("ghost role", "GHOST-TASK: use /skill:ghost-a."),
+      );
+      h.llm.onPrompt("GHOST-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      // An unresolved nested ref stays literal and is called out once, so the
+      // branch knows the skill is missing rather than silently skipping it.
+      assert.ok(delivered.includes(`==== Task role skill: ghost-a ====\n${aBody}`), delivered);
+      assert.ok(
+        delivered.endsWith("Note: /skill:ghost-skill (referenced by ghost-a) was not found."),
+        delivered,
+      );
+      h.assertSessionContains(assistant("Findings: none."));
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it(`stops inlining after ${MAX_INLINED_ROLE_SKILLS} sections`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-tree-cap-skill-"));
+    const h = await TestHarness.create();
+    try {
+      // A five-link chain: each skill references the next one.
+      const bodies: Record<string, string> = {};
+      for (let index = 0; index < MAX_INLINED_ROLE_SKILLS + 1; index += 1) {
+        bodies[`cap-${index}`] =
+          index < MAX_INLINED_ROLE_SKILLS
+            ? `# cap-${index}\n\nNext: /skill:cap-${index + 1}.\n`
+            : `# cap-${index}\n\nLeaf body.\n`;
+      }
+      const fixtures = await writeSkills(root, bodies);
+
+      setSkills(fixtures);
+      h.llm.onPrompt(
+        "main work",
+        responds("working..."),
+        pushTask("cap roles", "CAP-TASK: use /skill:cap-0."),
+      );
+      h.llm.onPrompt("CAP-TASK", responds("Findings: none."));
+
+      await h.prompt("main work");
+      await h.prompt("/start-task");
+
+      const delivered = deliveredPrompt(h);
+      assert.strictEqual(
+        count(delivered, "==== Task role skill: "),
+        MAX_INLINED_ROLE_SKILLS,
+        delivered,
+      );
+      assert.ok(
+        !delivered.includes(`==== Task role skill: cap-${MAX_INLINED_ROLE_SKILLS} ====`),
+        delivered,
+      );
+    } finally {
+      h.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+// Actual file existence is not required — resolution is pure string replacement.
 // Mock skill paths are project-relative for the test environment.
 // Actual file existence is not required — resolution is pure string replacement.
 const MOCK_SKILLS: Skill[] = [

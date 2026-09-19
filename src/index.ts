@@ -1849,22 +1849,55 @@ interface ResolveResult {
 }
 
 /**
+ * Cap on role-skill sections inlined into one delivered prompt. Resolution is
+ * transitive (a role skill may reference further role skills), so a heavily
+ * cross-referencing skill graph must not balloon the branch prompt.
+ */
+export const MAX_INLINED_ROLE_SKILLS = 4;
+
+/**
  * Append the resolved role skills' SKILL.md content to the delivered prompt.
  * Deterministic role loading: the task branch receives the full role contract
  * inline instead of depending on the model reading the referenced file paths.
  * Paths that fail to read fall back to the path reference already in the prompt.
+ *
+ * Resolution is transitive: a role skill may itself reference further role
+ * skills with `/skill:name`, and those bodies are inlined as well. The inlined
+ * bodies are the rewritten ones, so a nested ref reaches the branch as an
+ * absolute path — Pi expands `/skill:` commands in user input only, never
+ * inside a delivered prompt.
  */
 async function inlineRoleSkills(prompt: string, refs?: TaskData["skills"]): Promise<string> {
   if (!refs || refs.length === 0) return prompt;
   const sections: string[] = [];
-  for (const ref of refs) {
+  const seen = new Set<string>();
+  // Nested refs that resolve to nothing are reported to the branch instead of
+  // being warned on the mainline: this runs after the branch was started and
+  // the mainline is no longer the active context. Keyed by name so a ref that
+  // several skills point at is reported once, naming the first referrer.
+  const missing = new Map<string, string>();
+  const queue: Array<{ name: string; filePath: string }> = [...refs];
+  while (queue.length > 0 && sections.length < MAX_INLINED_ROLE_SKILLS) {
+    const ref = queue.shift();
+    if (!ref || seen.has(ref.name)) continue;
+    seen.add(ref.name);
     const content = await readRoleSkill(ref);
-    if (content !== undefined) {
-      sections.push(`==== Task role skill: ${ref.name} ====\n${content}`);
+    if (content === undefined) continue;
+    const { rewritten, resolved, unresolved } = resolveSkillRefs(content);
+    for (const name of unresolved) {
+      if (!missing.has(name)) missing.set(name, ref.name);
+    }
+    sections.push(`==== Task role skill: ${ref.name} ====\n${rewritten}`);
+    for (const nested of resolved) {
+      if (!seen.has(nested.name)) queue.push(nested);
     }
   }
   if (sections.length === 0) return prompt;
-  return `${prompt}\n\n${sections.join("\n\n")}`;
+  const notes = [...missing].map(
+    ([name, referencedBy]) => `Note: /skill:${name} (referenced by ${referencedBy}) was not found.`,
+  );
+  const inlined = `${prompt}\n\n${sections.join("\n\n")}`;
+  return notes.length > 0 ? `${inlined}\n\n${notes.join("\n")}` : inlined;
 }
 
 interface TaskData {

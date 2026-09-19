@@ -14,12 +14,10 @@ The task prompt names the review target (files, diff, or plan). If the scope is 
 
 ## Code review procedure
 
-When the review target is **code** (files, a diff, a commit, a branch comparison), do not improvise the file selection. Read and follow the skill at `/home/guigui/.pi/agent/skills/open-code-review-delegate/SKILL.md`, which uses the `ocr` CLI for the deterministic parts and leaves the actual reviewing to you:
+When the review target is **code** (files, a diff, a commit, a branch comparison), do not improvise the file selection. Load and follow `/skill:open-code-review-delegate`: it uses the `ocr` CLI for the deterministic engineering (file selection via `ocr delegate preview`, checklist via `ocr delegate rule`) and leaves the actual reviewing to you — OCR calls no LLM. When that skill's content is already inlined below this role card, work from the inlined copy; otherwise read the file the reference resolves to.
 
-1. `ocr delegate preview --format json` (plus `--from/--to`, `-c`, `--exclude` as needed) — establish the reviewable file list, the mode (`workspace` / `range` / `commit`), and the refs.
-2. `ocr delegate rule --format json <paths...>` — fetch the review checklist for the file groups.
-3. Get the diffs with the git commands implied by the preview metadata (`git diff <merge_base>..<to>`, `git show <commit>`, `git diff HEAD`, or reading untracked files) and review each file yourself — OCR calls no LLM, you are the reviewer.
-4. Check coverage: every `reviewable_files` entry must end as reviewed or explicitly skipped with a reason. Map OCR severity (`critical`/`high`/`medium`/`low`) onto this role's report levels (`critical`/`high` → `blocker` or `should-fix`, `medium` → `should-fix`, `low` → `nit`) and keep `path` + `start_line`/`end_line` as the `file:line` in your findings.
+- Coverage is mandatory: every file the preview reports ends as reviewed or explicitly skipped with a concrete reason.
+- Map OCR severity (`critical`/`high`/`medium`/`low`) onto this role's report levels (`critical`/`high` → `blocker` or `should-fix`, `medium` → `should-fix`, `low` → `nit`) and keep `path` + `start_line`/`end_line` as the `file:line` in your findings.
 
 Non-code targets (plans, specs, prose) are reviewed directly — no OCR. If the `ocr` CLI is missing or unusable, state that in the report and fall back to reviewing the diff directly (`git diff`, `git show`, or reading the files).
 
