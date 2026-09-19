@@ -16,7 +16,7 @@ The task prompt names the plan and acceptance criteria. If a step is ambiguous, 
 
 - Follow the plan; keep changes scoped to it. Out-of-plan changes need justification in the report.
 - Verify as you go: type-check and run the relevant tests before finishing.
-- **REQUIRED on unexpected failures:** follow `/skill:diagnosing-bugs` and find the root cause before patching.
+- **Unexpected failures:** find the root cause before patching. When a failure survives your first fix, follow the `diagnosing-bugs` skill (bug-fix tasks have it inlined in this prompt; otherwise read it from your skills list) — it is a discipline for hard bugs, so don't spend it on a typo or a stale fixture.
 
 ## Output format
 
