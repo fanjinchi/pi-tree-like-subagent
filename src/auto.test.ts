@@ -14,6 +14,7 @@ import {
   userPrompts,
   TestHarness,
 } from "./test-helpers/index.js";
+import { TASK_START_FRAMING_FRESH, taskStartMarker } from "./index.js";
 
 describe("automated workflow", () => {
   it("completes push-task -> /auto -> finish-task and injects the branch result", async () => {
@@ -76,10 +77,12 @@ describe("automated workflow", () => {
 
   it("warns and returns when /auto is already running", async () => {
     const h = await TestHarness.create();
-    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
-
-    // Task-execution
+    // Task rule first: the branch delivery carries the "[task-start: ...]"
+    // marker plus framing text containing "start", so a mainline rule
+    // registered earlier would swallow the branch's first call.
     h.llm.onPrompt("first task", responds("done"));
+
+    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
     h.llm.onPrompt("[task-result: x]\n\ndone", responds(""));
 
     // The second /auto runs while the loop is still draining the first task.
@@ -105,9 +108,10 @@ describe("automated workflow", () => {
 
   it("turns off when the last assistant message is aborted to empty text", async () => {
     const h = await TestHarness.create();
-    h.llm.onPrompt("start", responds(""), pushTask("implement phase 1", "Implement phase 1."));
-
+    // Branch rule first: the delivery text contains "start" (marker + framing).
     h.llm.onPrompt("Implement phase 1.", responds("ABCDEFGHIJ"));
+
+    h.llm.onPrompt("start", responds(""), pushTask("implement phase 1", "Implement phase 1."));
     h.user.onAssistant("FGHI", userEsc());
 
     try {
@@ -116,7 +120,12 @@ describe("automated workflow", () => {
       await h.prompt("/auto");
       await h.waitForAutoParked();
 
-      h.assertSession(user("Implement phase 1."), assistantAborted());
+      h.assertSession(
+        user(
+          taskStartMarker("implement phase 1") + TASK_START_FRAMING_FRESH + "Implement phase 1.",
+        ),
+        assistantAborted(),
+      );
       h.assertStatus("current task: implement phase 1");
     } finally {
       h.dispose();
@@ -158,11 +167,11 @@ describe("automated workflow", () => {
 
   it("delivers a queued steering message when the task finishes, then finalizes", async () => {
     const h = await TestHarness.create();
-    h.llm.onPrompt("start", responds(""), pushTask("quick fix", "Quick fix."));
-
-    // Task-execution
+    // Branch rules first: the delivery text contains "start" (marker + framing).
     h.llm.onPrompt("Quick fix.", responds("thinking..."));
     h.llm.onPrompt("steer it", responds("adjusted response"));
+
+    h.llm.onPrompt("start", responds(""), pushTask("quick fix", "Quick fix."));
 
     // Leaf continuations
     h.llm.onPrompt("[task-result: quick fix]\n\nadjusted response", responds(""));
@@ -194,10 +203,10 @@ describe("automated workflow", () => {
 
   it("stops when session is shut down during auto", async () => {
     const h = await TestHarness.create();
-    h.llm.onPrompt("start", responds(""), pushTask("x", "Shutdown task"));
-
-    // Task-execution
+    // Branch rule first: the delivery text contains "start" (marker + framing).
     h.llm.onPrompt("Shutdown task", responds("working..."));
+
+    h.llm.onPrompt("start", responds(""), pushTask("x", "Shutdown task"));
 
     // Leaf continuation (auto re-prompts after detecting Ctrl+C, but task is left open)
     h.llm.onPrompt("", responds(""));
@@ -209,7 +218,10 @@ describe("automated workflow", () => {
       await h.prompt("/auto");
       await h.waitForAutoParked();
 
-      h.assertSession(user("Shutdown task"), assistant("working..."));
+      h.assertSession(
+        user(taskStartMarker("x") + TASK_START_FRAMING_FRESH + "Shutdown task"),
+        assistant("working..."),
+      );
       h.assertStatus("current task: x");
     } finally {
       h.dispose();
@@ -235,10 +247,10 @@ describe("automated workflow", () => {
 
   it("stops on /auto-stop while a task is running", async () => {
     const h = await TestHarness.create();
-    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
-
-    // Task-execution
+    // Branch rule first: the delivery text contains "start" (marker + framing).
     h.llm.onPrompt("first task", responds("working..."));
+
+    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
 
     // /auto-stop executes concurrently while the task agent streams; the loop
     // picks up the flag at the next step boundary and leaves the task open.
@@ -252,7 +264,10 @@ describe("automated workflow", () => {
       h.assertLastNotification(
         "Auto mode off. It stops before the next step; the current task stays resumable.",
       );
-      h.assertSession(user("first task"), assistant("working..."));
+      h.assertSession(
+        user(taskStartMarker("x") + TASK_START_FRAMING_FRESH + "first task"),
+        assistant("working..."),
+      );
       h.assertStatus("current task: x");
     } finally {
       h.dispose();
@@ -272,10 +287,10 @@ describe("automated workflow", () => {
 
   it("is idempotent under repeated /auto-stop", async () => {
     const h = await TestHarness.create();
-    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
-
-    // Task-execution
+    // Branch rule first: the delivery text contains "start" (marker + framing).
     h.llm.onPrompt("first task", responds("working..."));
+
+    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
 
     // Both commands run while the loop is still inside waitForIdle, against
     // the same armed stop closure — a second stop is a no-op re-request.
@@ -289,7 +304,10 @@ describe("automated workflow", () => {
       h.assertLastNotification(
         "Auto mode off. It stops before the next step; the current task stays resumable.",
       );
-      h.assertSession(user("first task"), assistant("working..."));
+      h.assertSession(
+        user(taskStartMarker("x") + TASK_START_FRAMING_FRESH + "first task"),
+        assistant("working..."),
+      );
       h.assertStatus("current task: x");
     } finally {
       h.dispose();
@@ -321,10 +339,10 @@ describe("automated workflow", () => {
 
   it("resumes supervision after /auto-stop via a new /auto run", async () => {
     const h = await TestHarness.create();
-    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
-
-    // Task-execution
+    // Branch rule first: the delivery text contains "start" (marker + framing).
     h.llm.onPrompt("first task", responds("working..."));
+
+    h.llm.onPrompt("start", responds(""), pushTask("x", "first task"));
 
     // Mainline continuation after the second /auto run finalizes the open task.
     h.llm.onPrompt("[task-result: x]\n\nworking...", responds(""));

@@ -12,6 +12,12 @@ import {
   user,
   TestHarness,
 } from "./test-helpers/index.js";
+import {
+  TASK_RESUME_FRAMING,
+  TASK_START_FRAMING_FRESH,
+  taskResumeMarker,
+  taskStartMarker,
+} from "./index.js";
 
 describe("resume-task", () => {
   it("finish records a resumable point and /resume-task navigates back with a message", async () => {
@@ -31,9 +37,9 @@ describe("resume-task", () => {
       await h.prompt("/resume-task Fix the edge case.");
       // The resumed branch extends the original task branch.
       h.assertSession(
-        user("some prompt"),
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
         assistant("Done."),
-        user("Fix the edge case."),
+        user(taskResumeMarker("AAA") + TASK_RESUME_FRAMING + "Fix the edge case."),
         assistant("Fixed."),
       );
       h.assertStatus("current task: AAA");
@@ -107,9 +113,13 @@ describe("resume-task", () => {
 
       await h.prompt("/resume-task");
       h.assertSession(
-        user("some prompt"),
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
         assistant("Done."),
-        user('You are resuming the task "AAA". Continue from where you left off.'),
+        user(
+          taskResumeMarker("AAA") +
+            TASK_RESUME_FRAMING +
+            'You are resuming the task \"AAA\". Continue from where you left off.',
+        ),
         assistant("Resumed."),
       );
       h.assertStatus("current task: AAA");
@@ -271,7 +281,10 @@ describe("resume-task", () => {
       h.assertStatus("pending task: BBB");
 
       await h.prompt("/start-task");
-      h.assertSession(user("bbb prompt"), assistant("BBB done."));
+      h.assertSession(
+        user(taskStartMarker("BBB") + TASK_START_FRAMING_FRESH + "bbb prompt"),
+        assistant("BBB done."),
+      );
 
       await h.prompt("/finish-task");
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 2);

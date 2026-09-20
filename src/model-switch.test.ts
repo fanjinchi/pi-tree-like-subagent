@@ -9,6 +9,7 @@ import {
   user,
   TestHarness,
 } from "./test-helpers/index.js";
+import { TASK_START_FRAMING_FRESH, taskStartMarker } from "./index.js";
 
 describe("model switching on /start-task", () => {
   it("starts task without model arg (existing behavior unchanged)", async () => {
@@ -22,7 +23,10 @@ describe("model switching on /start-task", () => {
       h.assertModel("supergsd-test/deterministic");
       await h.prompt("/start-task");
       h.assertModel("supergsd-test/deterministic");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
       h.assertStatus("current task: AAA");
     } finally {
       h.dispose();
@@ -42,7 +46,10 @@ describe("model switching on /start-task", () => {
       h.assertModel("supergsd-test/deterministic");
       await h.prompt("/start-task Other");
       h.assertModel("supergsd-test/other-model");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
       h.assertStatus("current task: AAA");
 
       await h.prompt("/finish-task");
@@ -73,7 +80,10 @@ describe("model switching on /start-task", () => {
       h.assertModel("supergsd-test/deterministic");
       await h.prompt("/start-task supergsd-test/other-model");
       h.assertModel("supergsd-test/other-model");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
       h.assertStatus("current task: AAA");
     } finally {
       h.dispose();
@@ -149,7 +159,10 @@ describe("model switching on /start-task", () => {
       // First task with model switch — restores deterministic on finish
       await h.prompt("/start-task other");
       h.assertModel("supergsd-test/other-model");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
       await h.prompt("/finish-task");
       h.assertModel("supergsd-test/deterministic");
 
@@ -158,7 +171,10 @@ describe("model switching on /start-task", () => {
       await h.prompt("more work");
       await h.prompt("/start-task");
       h.assertModel("supergsd-test/deterministic");
-      h.assertSession(user("other prompt"), assistant("inner done"));
+      h.assertSession(
+        user(taskStartMarker("BBB") + TASK_START_FRAMING_FRESH + "other prompt"),
+        assistant("inner done"),
+      );
       await h.prompt("/finish-task");
       h.assertModel("supergsd-test/deterministic");
       h.assertSession(
@@ -200,7 +216,10 @@ describe("model switching on /start-task", () => {
       // FIFO: AAA starts first, with model-b
       await h.prompt("/start-task model-b");
       h.assertModel("supergsd-test/model-b");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
 
       // Finish — restores deterministic
       await h.prompt("/finish-task");
@@ -210,7 +229,10 @@ describe("model switching on /start-task", () => {
       // BBB starts with model-a
       await h.prompt("/start-task model-a");
       h.assertModel("supergsd-test/model-a");
-      h.assertSession(user("other prompt"), assistant("inner done"));
+      h.assertSession(
+        user(taskStartMarker("BBB") + TASK_START_FRAMING_FRESH + "other prompt"),
+        assistant("inner done"),
+      );
 
       // Finish — restores deterministic again
       await h.prompt("/finish-task");
@@ -249,7 +271,10 @@ describe("model switching on /start-task", () => {
       // Switch to model-a (previousModel = deterministic)
       await h.prompt("/start-task model-a");
       h.assertModel("supergsd-test/model-a");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
 
       // Re-register without deterministic to make it unavailable
       h.modelRegistry.registerProvider("supergsd-test", {
@@ -290,7 +315,10 @@ describe("model switching on /start-task", () => {
       h.assertModel("supergsd-test/deterministic");
       await h.prompt("/start-task other");
       h.assertModel("supergsd-test/other-model");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
       h.assertStatus("current task: AAA");
 
       // Abort switches model back and leaves task pending
@@ -307,7 +335,10 @@ describe("model switching on /start-task", () => {
       // Task can be started again (no model arg = deterministic, proving restore)
       await h.prompt("/start-task");
       h.assertModel("supergsd-test/deterministic");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
       h.assertStatus("current task: AAA");
     } finally {
       h.dispose();

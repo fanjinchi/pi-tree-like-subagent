@@ -13,6 +13,13 @@ import {
   user,
   TestHarness,
 } from "./test-helpers/index.js";
+import {
+  TASK_BRANCH_SYSTEM_PROMPT,
+  TASK_RESUME_FRAMING,
+  TASK_START_FRAMING_FRESH,
+  taskResumeMarker,
+  taskStartMarker,
+} from "./index.js";
 
 describe("task-ask", () => {
   it("syncs tool visibility per branch and keeps the system prompt byte-stable", async () => {
@@ -28,12 +35,20 @@ describe("task-ask", () => {
       assert.ok(!mainlineTools.includes("task-ask"), "task-ask hidden on mainline");
       assert.ok(mainlineTools.includes("push-task"));
       assert.ok(mainlineTools.includes("resume-task"));
+      assert.ok(
+        !mainlinePrompt.includes(TASK_BRANCH_SYSTEM_PROMPT),
+        "branch block absent on mainline",
+      );
 
       await h.prompt("/start-task");
       const branchTools = h.activeToolNames();
       assert.ok(branchTools.includes("task-ask"), "task-ask visible in branch");
       assert.ok(!branchTools.includes("push-task"), "push-task hidden in branch");
       assert.ok(!branchTools.includes("resume-task"), "resume-task hidden in branch");
+      assert.ok(
+        h.systemPromptText().endsWith(TASK_BRANCH_SYSTEM_PROMPT),
+        "branch block appended in branch",
+      );
 
       await h.prompt("/finish-task");
       assert.deepStrictEqual(h.activeToolNames(), mainlineTools);
@@ -60,6 +75,8 @@ describe("task-ask", () => {
       await h.prompt("main work");
       await h.prompt("/start-task");
       const firstBranchPrompt = h.systemPromptText();
+      assert.ok(firstBranchPrompt.endsWith(TASK_BRANCH_SYSTEM_PROMPT));
+      assert.ok(!firstBranchPrompt.includes("prompt aaa"), "title stays out of the prompt");
 
       await h.prompt("/finish-task");
       await h.prompt("/start-task");
@@ -149,11 +166,11 @@ describe("task-ask", () => {
 
       await h.prompt("/resume-task The answer is SQLite.");
       h.assertSession(
-        user("some prompt"),
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
         assistant("looked around"),
         user("need the schema"),
         assistant("", "toolUse"),
-        user("The answer is SQLite."),
+        user(taskResumeMarker("AAA") + TASK_RESUME_FRAMING + "The answer is SQLite."),
         assistant("Done."),
       );
       h.assertStatus("current task: AAA");
@@ -238,9 +255,13 @@ describe("task-ask", () => {
 
       await h.prompt("/resume-task");
       h.assertSession(
-        user("some prompt"),
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
         assistant("half done"),
-        user('You are resuming the task "AAA". Continue from where you left off.'),
+        user(
+          taskResumeMarker("AAA") +
+            TASK_RESUME_FRAMING +
+            'You are resuming the task \"AAA\". Continue from where you left off.',
+        ),
         assistant("all done"),
       );
       h.assertStatus("current task: AAA");

@@ -521,6 +521,61 @@ export function taskQuestionMarker(title: string): string {
   return `[task-question: ${title}]\n\n`;
 }
 
+/** Marker injected before a started task's prompt. See taskResultMarker. */
+export function taskStartMarker(title: string): string {
+  return `[task-start: ${title}]\n\n`;
+}
+
+/** Marker injected before a resume message. See taskResultMarker. */
+export function taskResumeMarker(title: string): string {
+  return `[task-resume: ${title}]\n\n`;
+}
+
+/** Fork branches inherit the mainline transcript, including the push-task call. */
+export const TASK_START_FRAMING_FORK =
+  "This task is running now: the push-task call above only queued it and it has since been started. " +
+  "The conversation above is the mainline context that produced the task - use it as background, do not redo it. " +
+  "Execute the task below; your final message is the report to the mainline.\n\n";
+
+/** Fresh branches start from an empty context, so the framing must not claim otherwise. */
+export const TASK_START_FRAMING_FRESH =
+  "This task is running now: it was queued on the mainline and started here from a fresh context. " +
+  "Do not wait for or request a start. Execute the task below; your final message is the report to the mainline.\n\n";
+
+/** Resume deliveries carry follow-up input, not a new task. */
+export const TASK_RESUME_FRAMING =
+  "This task is running again: the mainline started it here and sent the input below as follow-up " +
+  "(review findings, an answer, or a correction). Continue the same task - this is new input, not a new task. " +
+  "Your final message is the report to the mainline.\n\n";
+
+/**
+ * Appended to the system prompt inside a task branch. A branch inherits the
+ * mainline transcript *and* its system prompt, so nothing else in the prompt
+ * tells the model that the task it can see being queued is already running -
+ * without this block the model can conclude it is still on the mainline and
+ * that the task has not been started.
+ *
+ * Static text only: a task title here would break the two byte-stable system
+ * prompts (mainline / task branch) that the cache depends on. Titles travel in
+ * the branch-tip delivery message instead (see taskStartMarker).
+ */
+export const TASK_BRANCH_SYSTEM_PROMPT = `# Task branch
+
+You are inside a queued task branch: this task is already running. The mainline queued it with push-task and started it here; the mainline is blocked while you work and receives only your final message, as the task result.
+
+- Never report that no task is running, and never ask for this task to be started - it is live now.
+- The push-task / resume-task tool descriptions in this prompt describe the mainline; those tools are not available in this branch.
+- A "Task stored ... \`/start-task\` ..." receipt in the history above was written for the mainline before this task started; it is not a statement that this task is unstarted.
+- Use task-ask if that tool is available and a question blocks progress; otherwise state the blocker in your final message.
+- Mode rules stated elsewhere in this prompt (for example plan mode) stay in force in this branch; if they forbid what this task asks for, name the conflict in your final message instead of doing forbidden work.
+- Work to completion and make your final message the full report.
+`;
+
+/** The system-prompt text appended inside a task branch ("" on the mainline). */
+export function taskBranchSystemPromptAppend(session: ReadonlySessionLike): string {
+  return currentTask(session) === null ? "" : `\n\n${TASK_BRANCH_SYSTEM_PROMPT}`;
+}
+
 export function refreshTaskStatus(ctx: TaskStatusContext, options: TaskStatusOptions = {}): void {
   if (ctx.hasUI) {
     // The "[auto]" prefix is sticky while the auto switch is on: every
@@ -1153,7 +1208,10 @@ async function startTask(
   }
   const agentStarted = taskStartId ? options.waitForAgentStart?.(taskStartId) : undefined;
   const deliveredPrompt = await inlineRoleSkills(activeTask.data.prompt, activeTask.data.skills);
-  pi.sendUserMessage(deliveredPrompt);
+  // "untitled" fallback: a title made of "]"/whitespace only sanitizes to "".
+  const label = taskMarkerTitle(activeTask.data.title) || "untitled";
+  const framing = fork ? TASK_START_FRAMING_FORK : TASK_START_FRAMING_FRESH;
+  pi.sendUserMessage(taskStartMarker(label) + framing + deliveredPrompt);
 
   refreshTaskStatus(ctx, { prefix: options.statusPrefix });
 
@@ -1329,7 +1387,7 @@ async function resumeTask(
     return "error";
   }
 
-  const title = taskMarkerTitle(suspended.data.title);
+  const title = taskMarkerTitle(suspended.data.title) || "untitled";
   if (!message) {
     message = `You are resuming the task "${title}". Continue from where you left off.`;
   }
@@ -1373,7 +1431,7 @@ async function resumeTask(
     );
   }
   const agentStarted = taskStartId ? options.waitForAgentStart?.(taskStartId) : undefined;
-  pi.sendUserMessage(message);
+  pi.sendUserMessage(taskResumeMarker(title) + TASK_RESUME_FRAMING + message);
 
   refreshTaskStatus(ctx, { prefix: options.statusPrefix });
 

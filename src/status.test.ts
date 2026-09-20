@@ -2,6 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 
 import { assistant, pushTask, responds, taskAsk, user, TestHarness } from "./test-helpers/index.js";
+import { TASK_START_FRAMING_FRESH, taskStartMarker } from "./index.js";
 
 describe("task status bar", () => {
   it("cycles through pending, current, suspended and back to pending", async () => {
@@ -17,7 +18,10 @@ describe("task status bar", () => {
       h.assertStatus("pending task: AAA");
 
       await h.prompt("/start-task");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
       h.assertStatus("current task: AAA");
 
       // Abort leaves the entry pending, so the task is startable again.

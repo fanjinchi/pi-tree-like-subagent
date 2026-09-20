@@ -17,6 +17,7 @@ import {
   setModelRegistry,
   setupTaskSupervisor,
   syncTaskToolVisibility,
+  taskBranchSystemPromptAppend,
   toolPushTask,
   toolResumeTask,
   toolTaskAsk,
@@ -43,10 +44,15 @@ export default function register(pi: ExtensionAPI): void {
   // shutdown handling must not depend on the /auto command ever running.
   setupTaskSupervisor(pi);
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     if (event.systemPromptOptions.skills?.length) {
       setSkillsFromEvent(event.systemPromptOptions.skills);
     }
+    // Inside a task branch the system prompt must say so: the branch inherits
+    // the mainline transcript (push-task receipt included), and nothing else
+    // in the prompt tells the model the task is already running.
+    const branchAppend = taskBranchSystemPromptAppend(ctx.sessionManager);
+    return branchAppend ? { systemPrompt: event.systemPrompt + branchAppend } : undefined;
   });
 
   pi.on("session_start", async (_event, ctx) => {

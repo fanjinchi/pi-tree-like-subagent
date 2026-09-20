@@ -29,6 +29,12 @@ Invariants:
 - When leaving a branch, `returnTo` must be captured **after** appending all bookkeeping entries meant for the departure branch — otherwise the return navigation orphans them.
 - `navigateTree` is only available on command context; never call it from event handlers.
 
+### Task-branch identity (delivery framing + system-prompt block)
+
+A branch tip's model-visible delivery always opens with a `[<kind>: <label>]` marker and a **static framing sentence** stating that the task is already running: `[task-start: <title>]` for a started task (fork and fresh wording differ — a fork must not read the inherited `push-task` receipt as "not started yet"), `[task-resume: <title>]` for a resume, next to the older `task-result` / `task-question` markers. The start and resume delivery call sites label with `taskMarkerTitle(<raw title>) || "untitled"` (a title made of `]`/whitespace only sanitizes to `""`); the marker helpers stay pure formatting (no sanitizing inside). The older `task-result` / `task-question` call sites pass `taskMarkerTitle(...)` without that fallback — pre-existing and unchanged here.
+
+The branch system prompt carries the static `TASK_BRANCH_SYSTEM_PROMPT` block, appended in the root `index.ts` `before_agent_start` handler whenever `taskBranchSystemPromptAppend(ctx.sessionManager)` finds a `currentTask` — the same predicate as the tool-visibility sync, so prompt variant and tool set never diverge. Two rules for that block: its first sentence must assert the identity on its own (extensions are chained in **load** order, so a later-loaded extension appends *after* us — position is not authority), and it must stay free of dynamic data (titles travel only in the branch-tip message). Mode blocks (plan mode, ACP) stay in force inside branches by design; the block says so instead of overriding them.
+
 ### Task supervisor (auto / relay)
 
 - One foreground serial loop supervises task work. `armSupervisor(pi, ctx, mode)` — called from a command handler, never an event handler — starts or upgrades a detached loop and returns immediately; the loop navigates only through the `ExtensionCommandContext` captured at arming time. Two modes:
@@ -44,8 +50,8 @@ Invariants:
 ### Cache constraints (do not regress)
 
 1. State entries are `appendEntry` custom entries (model-invisible) — keep it that way.
-2. Model-visible injections (`task-result`, `task-question`, resume messages) only ever append at the branch tip.
-3. Tool visibility sync (`syncTaskToolVisibility`) must filter subsets of the canonical order captured at `session_start`, so exactly two byte-stable system prompts exist (mainline / task branch).
+2. Model-visible injections (`task-result`, `task-question`, the `[task-start: …]` / `[task-resume: …]` deliveries, resume messages) only ever append at the branch tip, each as `[<kind>: <label>]` + static framing + payload (`taskStartMarker` / `taskResumeMarker` with `TASK_START_FRAMING_FORK|FRESH` / `TASK_RESUME_FRAMING`).
+3. Tool visibility sync (`syncTaskToolVisibility`) must filter subsets of the canonical order captured at `session_start`, so exactly two byte-stable system prompts exist (mainline / task branch): the branch variant is the mainline prompt **with the branch tool set** (`task-ask` in place of `push-task`/`resume-task`) **and** the static `TASK_BRANCH_SYSTEM_PROMPT` block appended at the end by the root `index.ts` `before_agent_start` handler, via the same `currentTask(session) !== null` predicate. `src/prompt-framing.test.ts` pins both the delivery wording and the appended block.
 4. System prompt takes static text only — dynamic data (task titles) travels in user messages, never in the system prompt.
 5. Same for the **tool descriptions and `promptGuidelines`**: `task-ask` / `resume-task` wording is part of the two byte-stable system prompts, so it must stay mode-neutral — never interpolate the live supervisor mode (`isSupervisorActive`) into it. Mode-dependent wording is allowed only in branch-tip messages (notify / tool results), which are not cached.
 

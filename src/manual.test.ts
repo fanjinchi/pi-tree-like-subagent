@@ -11,6 +11,7 @@ import {
   taskResult,
   user,
 } from "./test-helpers/index.js";
+import { TASK_START_FRAMING_FRESH, taskStartMarker } from "./index.js";
 
 import { describe } from "node:test";
 
@@ -44,7 +45,10 @@ describe("manual workflow", () => {
       }),
       node("start AAA", async (h) => {
         await h.prompt("/start-task");
-        h.assertSession(user("some prompt"), assistant("Done."));
+        h.assertSession(
+          user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+          assistant("Done."),
+        );
         h.assertStatus("current task: AAA");
       }).children(
         node("finish AAA", async (h) => {
@@ -119,7 +123,10 @@ describe("manual workflow", () => {
         }).children(
           node("start AAA", async (h) => {
             await h.prompt("/start-task");
-            h.assertSession(user("some prompt"), assistant("Done."));
+            h.assertSession(
+              user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+              assistant("Done."),
+            );
             h.assertStatus("current task: AAA");
           }).children(
             node("finish AAA", async (h) => {
@@ -164,7 +171,10 @@ describe("manual workflow", () => {
         }),
         node("start AAA first (FIFO)", async (h) => {
           await h.prompt("/start-task");
-          h.assertSession(user("some prompt"), assistant("Done."));
+          h.assertSession(
+            user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+            assistant("Done."),
+          );
           h.assertStatus("current task: AAA");
         }).children(
           node("finish AAA", async (h) => {
@@ -183,7 +193,10 @@ describe("manual workflow", () => {
           }).children(
             node("start BBB", async (h) => {
               await h.prompt("/start-task");
-              h.assertSession(user("other prompt"), assistant("inner done"));
+              h.assertSession(
+                user(taskStartMarker("BBB") + TASK_START_FRAMING_FRESH + "other prompt"),
+                assistant("inner done"),
+              );
               h.assertStatus("current task: BBB");
             }).children(
               node("finish BBB", async (h) => {

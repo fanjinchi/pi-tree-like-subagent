@@ -11,6 +11,8 @@ import {
   TestHarness,
 } from "./test-helpers/index.js";
 
+import { TASK_START_FRAMING_FORK, TASK_START_FRAMING_FRESH, taskStartMarker } from "./index.js";
+
 describe("fork tasks", () => {
   it("starts a fork task from the current context without navigation", async () => {
     const h = await TestHarness.create();
@@ -31,7 +33,9 @@ describe("fork tasks", () => {
         user("plan work"),
         assistant("the plan is X", "toolUse"),
         task("implement", "Implement plan X as discussed."),
-        user("Implement plan X as discussed."),
+        user(
+          taskStartMarker("implement") + TASK_START_FRAMING_FORK + "Implement plan X as discussed.",
+        ),
         assistant("Implemented."),
       );
       h.assertStatus("current task: implement");
@@ -50,7 +54,12 @@ describe("fork tasks", () => {
         assistant("Great!"),
       );
       h.assertStatus("suspended: implement");
-      h.assertSessionContains(user("Implement plan X as discussed."), assistant("Implemented."));
+      h.assertSessionContains(
+        user(
+          taskStartMarker("implement") + TASK_START_FRAMING_FORK + "Implement plan X as discussed.",
+        ),
+        assistant("Implemented."),
+      );
     } finally {
       h.dispose();
     }
@@ -65,7 +74,10 @@ describe("fork tasks", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/start-task");
-      h.assertSession(user("some prompt"), assistant("Done."));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("Done."),
+      );
       const starts = h.branchCustomData("task-start") as Array<{ fork?: boolean }>;
       assert.strictEqual(starts.length, 1);
       assert.strictEqual(starts[0].fork, undefined);

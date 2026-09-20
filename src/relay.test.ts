@@ -13,6 +13,12 @@ import {
   user,
   TestHarness,
 } from "./test-helpers/index.js";
+import {
+  TASK_RESUME_FRAMING,
+  TASK_START_FRAMING_FRESH,
+  taskResumeMarker,
+  taskStartMarker,
+} from "./index.js";
 
 describe("task relay", () => {
   it("manual mode relays a task question automatically", async () => {
@@ -51,9 +57,9 @@ describe("task relay", () => {
       await h.prompt("The answer is SQLite.");
       await h.waitForAutoParked();
       h.assertSession(
-        user("some prompt"),
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
         assistant("", "toolUse"),
-        user("The answer is SQLite."),
+        user(taskResumeMarker("AAA") + TASK_RESUME_FRAMING + "The answer is SQLite."),
         assistant("Done."),
       );
       h.assertStatus("current task: AAA");
@@ -124,7 +130,10 @@ describe("task relay", () => {
 
       // Finishing a run stays the user's decision: the relay parked instead.
       h.assertStatus("current task: AAA");
-      h.assertSession(user("some prompt"), assistant("half done"));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+        assistant("half done"),
+      );
       assert.strictEqual(h.countAllCustomEntries("task-suspended"), 0);
       assert.strictEqual(h.countAllCustomEntries("task-done"), 0);
 

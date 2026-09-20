@@ -14,7 +14,13 @@ import {
   user,
 } from "./test-helpers/index.js";
 
-import { findOwnSkillFile, MAX_INLINED_ROLE_SKILLS, setSkills } from "./index.js";
+import {
+  findOwnSkillFile,
+  MAX_INLINED_ROLE_SKILLS,
+  setSkills,
+  TASK_START_FRAMING_FRESH,
+  taskStartMarker,
+} from "./index.js";
 
 import type { Skill } from "@earendil-works/pi-coding-agent";
 
@@ -254,7 +260,9 @@ describe("push-task skill resolution", () => {
       // bundled here, so the branch is told about that unresolved nested ref.
       h.assertSessionContains(
         user(
-          `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent.replaceAll("/skill:task-review", skillPath)}\n\nNote: /skill:open-code-review-delegate (referenced by task-review) was not found.`,
+          taskStartMarker("role task") +
+            TASK_START_FRAMING_FRESH +
+            `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent.replaceAll("/skill:task-review", skillPath)}\n\nNote: /skill:open-code-review-delegate (referenced by task-review) was not found.`,
         ),
         assistant("Findings: none."),
       );
@@ -307,7 +315,9 @@ describe("push-task skill resolution", () => {
       // unresolved here (no registry, no bundled copy) and is reported.
       h.assertSessionContains(
         user(
-          `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent.replaceAll("/skill:task-review", skillPath)}\n\nNote: /skill:open-code-review-delegate (referenced by task-review) was not found.`,
+          taskStartMarker("role task") +
+            TASK_START_FRAMING_FRESH +
+            `Review the changes ${skillPath}.\n\n==== Task role skill: task-review ====\n${skillContent.replaceAll("/skill:task-review", skillPath)}\n\nNote: /skill:open-code-review-delegate (referenced by task-review) was not found.`,
         ),
         assistant("Findings: none."),
       );

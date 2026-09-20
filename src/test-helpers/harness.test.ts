@@ -14,6 +14,7 @@ import {
   userPrompts,
   TestHarness,
 } from "./index.js";
+import { TASK_START_FRAMING_FRESH, taskStartMarker } from "../index.js";
 
 describe("AgentSession-backed TestHarness foundation", () => {
   it("creates a real session and registers push-task through the extension", async (t) => {
@@ -75,9 +76,16 @@ describe("AgentSession-backed TestHarness foundation", () => {
     h.llm.onPrompt("queue AAA", pushTask("AAA", "some prompt"));
 
     await h.prompt("queue AAA");
+    const delivered = taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt";
     await assert.rejects(
       async () => h.prompt("/start-task"),
-      /No MockLLM rule matched provider prompt: some prompt/,
+      (error: unknown) => {
+        assert.strictEqual(
+          (error as Error).message,
+          `No MockLLM rule matched provider prompt: ${delivered}`,
+        );
+        return true;
+      },
     );
   });
 
@@ -117,7 +125,10 @@ describe("AgentSession-backed TestHarness foundation", () => {
     await h.prompt("main work");
     await h.prompt("/start-task");
 
-    h.assertSession(user("some prompt"), assistant("Done."));
+    h.assertSession(
+      user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "some prompt"),
+      assistant("Done."),
+    );
     h.assertStatus("current task: AAA");
     h.assertSessionContains(
       user("main work"),

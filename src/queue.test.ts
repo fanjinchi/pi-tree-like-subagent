@@ -11,6 +11,7 @@ import {
   TestHarness,
   user,
 } from "./test-helpers/index.js";
+import { TASK_START_FRAMING_FRESH, taskStartMarker } from "./index.js";
 
 describe("task queue (FIFO)", () => {
   it("runs queued tasks in call order and consumes each entry by id", async () => {
@@ -34,14 +35,20 @@ describe("task queue (FIFO)", () => {
 
       // FIFO: the oldest entry starts first.
       await h.prompt("/start-task");
-      h.assertSession(user("first prompt"), assistant("first done"));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "first prompt"),
+        assistant("first done"),
+      );
       await h.prompt("/finish-task");
       // Only AAA was consumed; BBB and CCC are still queued.
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);
       h.assertStatus("pending task: BBB (+1 queued)");
 
       await h.prompt("/start-task");
-      h.assertSession(user("second prompt"), assistant("second done"));
+      h.assertSession(
+        user(taskStartMarker("BBB") + TASK_START_FRAMING_FRESH + "second prompt"),
+        assistant("second done"),
+      );
       await h.prompt("/finish-task");
       h.assertStatus("pending task: CCC");
 
@@ -78,7 +85,10 @@ describe("task queue (FIFO)", () => {
       await h.prompt("/start-task");
       // Stop the relay: this test drives the bookkeeping by hand.
       await h.prompt("/auto-stop");
-      h.assertSession(user("first prompt"), assistant("first done"));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "first prompt"),
+        assistant("first done"),
+      );
       await h.prompt("/finish-task");
       h.assertStatus("suspended: AAA");
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 2);
@@ -270,12 +280,18 @@ describe("task queue (FIFO)", () => {
       h.assertStatus("pending task: AAA (+1 queued)");
 
       await h.prompt("/start-task");
-      h.assertSession(user("first prompt"), assistant("first done"));
+      h.assertSession(
+        user(taskStartMarker("AAA") + TASK_START_FRAMING_FRESH + "first prompt"),
+        assistant("first done"),
+      );
       await h.prompt("/finish-task");
       h.assertStatus("pending task: BBB");
 
       await h.prompt("/start-task");
-      h.assertSession(user("second prompt"), assistant("second done"));
+      h.assertSession(
+        user(taskStartMarker("BBB") + TASK_START_FRAMING_FRESH + "second prompt"),
+        assistant("second done"),
+      );
       await h.prompt("/finish-task");
       h.assertStatus("suspended: BBB");
     } finally {
