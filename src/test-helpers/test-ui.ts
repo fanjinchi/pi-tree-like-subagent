@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import { Theme } from "@earendil-works/pi-coding-agent";
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
@@ -8,6 +9,7 @@ export class TestUi {
   #lastNotification: string | undefined;
   #lastStatus: string | undefined;
   #lastStatusRaw: string | undefined;
+  #lastWidget: string[] | undefined;
 
   readonly context: ExtensionUIContext = {
     ...noOpContext,
@@ -19,6 +21,25 @@ export class TestUi {
       // Capture before normalization so tests can assert ANSI styling survived.
       this.#lastStatusRaw = value;
       this.#lastStatus = normalizeText(value);
+    },
+    setWidget: (
+      key: string,
+      content:
+        | string[]
+        | ((tui: TUI, theme: Theme) => Component & { dispose?(): void })
+        | undefined,
+      options?: { placement?: "aboveEditor" | "belowEditor" },
+    ) => {
+      if (key !== "task-branch") return;
+      // Fail fast on stub/real-TUI divergence: the extension must stay on the
+      // string-array, aboveEditor contract, otherwise the stub would silently
+      // mis-model the real setWidget. undefined is the official clear signal.
+      if (content !== undefined && !Array.isArray(content))
+        throw new Error("test stub: expected string[] setWidget content");
+      if (options?.placement && options.placement !== "aboveEditor")
+        throw new Error("test stub: unexpected widget placement");
+      const lines = (content ?? []).map(normalizeText).filter((line) => line !== undefined);
+      this.#lastWidget = lines.length > 0 ? lines : undefined;
     },
   };
 
@@ -33,6 +54,11 @@ export class TestUi {
 
   get lastNotification(): string | undefined {
     return this.#lastNotification;
+  }
+
+  /** Task-branch widget lines (normalized), or undefined when cleared. */
+  get lastWidget(): string[] | undefined {
+    return this.#lastWidget;
   }
 }
 

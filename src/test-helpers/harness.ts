@@ -129,6 +129,11 @@ export class TestHarness {
     assert.strictEqual(this.testUi.lastStatus, expected);
   }
 
+  /** Task-branch widget lines (normalized), or undefined when cleared. */
+  assertWidget(expected?: string[]): void {
+    assert.deepStrictEqual(this.testUi.lastWidget, expected);
+  }
+
   /** Raw status value before ANSI stripping — asserts that styling was applied. */
   get lastStatusRaw(): string | undefined {
     return this.testUi.lastStatusRaw;

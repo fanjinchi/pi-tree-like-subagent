@@ -93,4 +93,35 @@ describe("task status bar", () => {
       h.dispose();
     }
   });
+
+  it("pins a persistent widget above the editor while inside a branch", async () => {
+    const h = await TestHarness.create();
+    h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
+    h.llm.onPrompt("some prompt", responds("Done."));
+    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
+
+    try {
+      await h.prompt("main work");
+      // Queued on the mainline: no branch, no widget (the footer status line
+      // is squeezed off short terminals like phones, so the widget is the
+      // only persistent in-branch marker).
+      h.assertWidget(undefined);
+
+      await h.prompt("/start-task");
+      h.assertWidget(["任务分支: AAA"]);
+      h.assertStatus("current task: AAA");
+
+      // Leaving the branch clears the widget again.
+      await h.prompt("/abort-task");
+      h.assertWidget(undefined);
+
+      await h.prompt("/start-task");
+      h.assertWidget(["任务分支: AAA"]);
+
+      await h.prompt("/finish-task");
+      h.assertWidget(undefined);
+    } finally {
+      h.dispose();
+    }
+  });
 });

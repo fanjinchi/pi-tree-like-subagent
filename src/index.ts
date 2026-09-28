@@ -586,7 +586,33 @@ export function refreshTaskStatus(ctx: TaskStatusContext, options: TaskStatusOpt
       ...options,
       prefix,
     });
+    syncTaskBranchWidget(ctx);
   }
+}
+
+/**
+ * The widget key of the persistent in-branch indicator above the editor.
+ *
+ * The footer status line is the bottom-most element of the dock: on short
+ * terminals (phones with a soft keyboard) it is the first thing squeezed off
+ * the screen, so the branch marker must not live only there. While the
+ * current session is inside a task branch, a widget pinned above the input
+ * box states it; everywhere else the widget is cleared. Guarded by the same
+ * `currentTask` predicate as the branch system-prompt append, so the widget
+ * and the prompt variant can never disagree.
+ */
+function syncTaskBranchWidget(ctx: TaskStatusContext): void {
+  const active = currentTask(ctx.sessionManager);
+  // Folded marker-safe variant: a multi-line/whitespace-only title would
+  // otherwise render a multi-line widget line (Text renders each element on
+  // one row) and defeat the widget's purpose on short phone terminals. The
+  // footer status keeps the bare taskTitle() — pre-existing behavior.
+  const title = active ? taskMarkerTitle(active.data.title) || "untitled" : undefined;
+  ctx.ui.setWidget(
+    "task-branch",
+    title === undefined ? undefined : [`${ctx.ui.theme.fg("warning", "任务分支")}: ${title}`],
+    { placement: "aboveEditor" },
+  );
 }
 
 export function updateTaskStatus(
