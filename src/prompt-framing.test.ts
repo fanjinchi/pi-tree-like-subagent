@@ -160,18 +160,27 @@ describe("task-branch system prompt", () => {
 
       await h.prompt("/start-task");
       const branchPrompt = h.systemPromptText();
-      const blockSuffix = `\n\n${TASK_BRANCH_SYSTEM_PROMPT}`;
-      assert.strictEqual(branchPrompt.slice(-blockSuffix.length), blockSuffix);
+      // 0.87.1 contributes the block as a named prompt section, so it renders
+      // wrapped in <task_branch>…</task_branch> (still at the tail of the
+      // prompt, but not as a bare suffix).
+      const blockSection = `<task_branch>\n${TASK_BRANCH_SYSTEM_PROMPT}\n</task_branch>`;
+      assert.ok(branchPrompt.includes(blockSection), "branch block present as a prompt section");
       // The per-branch tool/guideline sections are pre-existing branch
-      // behaviour; the block sits below an otherwise untouched base.
-      const branchBase = branchPrompt.slice(0, -blockSuffix.length);
-      assert.ok(
-        branchBase.startsWith(mainlinePrompt.slice(0, mainlinePrompt.indexOf("Available tools:"))),
+      // behaviour; the block sits below an otherwise untouched base. 0.87.1
+      // renders tools as a <tools> section and tool guidelines inside <rules>,
+      // so pin the preamble and the post-rules tail byte-for-byte and spot-
+      // check the rules that swap with the branch tool set.
+      const branchBase = branchPrompt.replace(blockSection, "");
+      assert.strictEqual(
+        branchBase.slice(0, branchBase.indexOf("<tools>")),
+        mainlinePrompt.slice(0, mainlinePrompt.indexOf("<tools>")),
+        "preamble bytes unchanged",
       );
       assert.ok(
-        branchBase.endsWith(
-          mainlinePrompt.slice(mainlinePrompt.indexOf("- Be concise in your responses")),
-        ),
+        branchBase
+          .replace(/\n+$/, "")
+          .endsWith(mainlinePrompt.slice(mainlinePrompt.indexOf("</rules>"))),
+        "tail after rules unchanged (modulo the dropped section separator)",
       );
       assert.ok(branchBase.includes("- task-ask: Ask the mainline orchestrator"));
       assert.ok(!branchBase.includes("push-task is the default way to handle"));

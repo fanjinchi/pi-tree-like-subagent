@@ -18,6 +18,7 @@ import {
   setupTaskSupervisor,
   syncTaskToolVisibility,
   taskBranchSystemPromptAppend,
+  TASK_BRANCH_SYSTEM_PROMPT,
   toolPushTask,
   toolResumeTask,
   toolTaskAsk,
@@ -50,15 +51,49 @@ export default function register(pi: ExtensionAPI): void {
     }
     // Inside a task branch the system prompt must say so: the branch inherits
     // the mainline transcript (push-task receipt included), and nothing else
-    // in the prompt tells the model the task is already running.
-    const branchAppend = taskBranchSystemPromptAppend(ctx.sessionManager);
-    return branchAppend ? { systemPrompt: event.systemPrompt + branchAppend } : undefined;
+    // in the prompt tells the model the task is already running. Contribute the
+    // block as a named prompt section (0.87.1) instead of returning
+    // systemPrompt: the return value force-replaces the whole prompt and would
+    // clobber other extensions' contributions, while sections render at the
+    // tail and are recorded in the transcript's system message.
+    const branchPrompt = taskBranchSystemPromptAppend(ctx.sessionManager);
+    if (branchPrompt) {
+      const sections = (event.systemPromptOptions.sections ??= {});
+      sections.task_branch = TASK_BRANCH_SYSTEM_PROMPT;
+    }
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     setModelRegistry(ctx.modelRegistry);
     captureToolOrder(pi.getActiveTools());
     syncTaskToolVisibility(pi, ctx.sessionManager);
+    // /auto is on by default for brand-new sessions. Synthesize the command
+    // through the normal extension-command dispatch: prompt() executes
+    // extension commands before model validation and appends no entry when
+    // the command handles the message, so the sole visible effects are the
+    // /auto notify and the auto status prefix, and the two byte-stable
+    // system prompts stay untouched. The dispatched command context carries
+    // the navigation actions the supervisor loop captures, so queued tasks
+    // run without /auto ever being typed. Reason semantics: "startup" is the
+    // first frame of a normal launch, "new" a /new (runtime replacement)
+    // frame; both can still carry a restored old session, so arm only when
+    // this session holds no message entries yet (a fresh session has none
+    // before its first model turn). "resume"/"fork"/"reload" sessions and
+    // restored ones keep their previous state; /auto-stop turns it off for
+    // the session.
+    if (event.reason === "startup" || event.reason === "new") {
+      const freshSession = !ctx.sessionManager.getEntries().some((e) => e.type === "message");
+      if (freshSession) {
+        try {
+          // expandPromptTemplates routes "/auto" through the extension-command
+          // pipeline (pi 0.87.1+ forwards it natively); without it the text
+          // would reach the model instead of the command handler.
+          pi.sendUserMessage("/auto", { expandPromptTemplates: true });
+        } catch {
+          // Never let a synthesized /auto break session startup.
+        }
+      }
+    }
     refreshTaskStatus(ctx);
   });
 

@@ -1,11 +1,16 @@
 import * as piAi from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  Model,
+  SimpleStreamOptions,
+  TranscriptContext,
+} from "@earendil-works/pi-ai";
 
 import { extractTextContent } from "../text-content.js";
 import type { MockLLM, MockLLMDescriptor } from "./mock-llm.js";
 import type { MockUserAction } from "./mock-user.js";
 
-const registrations = new WeakMap<FauxProvider, piAi.FauxProviderRegistration>();
+const registrations = new WeakMap<FauxProvider, ReturnType<typeof piAi.createFauxCore>>();
 
 /** Only the most recent stream is ever read (lastPromptMessages); cap the history so long /auto runs do not accumulate every prompt verbatim. */
 const MAX_RECORDED_PROMPTS = 50;
@@ -37,9 +42,11 @@ export class FauxProvider {
     private readonly llm: MockLLM,
     private readonly matchAssistantActions: (text: string) => MockUserAction[],
   ) {
+    // pi 0.87.1: registerFauxProvider/root-level streamSimple were replaced by
+    // createFauxCore, a self-contained scripted stream (no global registry).
     registrations.set(
       this,
-      piAi.registerFauxProvider({
+      piAi.createFauxCore({
         api: FAUX_MODEL.api,
         provider: FAUX_PROVIDER,
         tokenSize: { min: 1, max: 1 },
@@ -67,7 +74,7 @@ export class FauxProvider {
     return this.recordedPrompts[this.recordedPrompts.length - 1];
   }
 
-  stream(model: Model<string>, context: Context, options?: SimpleStreamOptions) {
+  stream(model: Model<string>, context: TranscriptContext, options?: SimpleStreamOptions) {
     this.recordedPrompts.push(
       context.messages.map((message) => ({
         role: message.role,
@@ -96,7 +103,7 @@ export class FauxProvider {
     );
     registration.setResponses([message]);
 
-    return piAi.streamSimple(model, context, options);
+    return registration.streamSimple(model, context, options);
   }
 
   /**
@@ -106,7 +113,7 @@ export class FauxProvider {
    * with a visible error instead of hanging the test process.
    */
   private detectNoProgressLoop(
-    context: Context,
+    context: TranscriptContext,
     promptText: string,
     responses: MockLLMDescriptor[],
   ): void {
@@ -137,9 +144,8 @@ export class FauxProvider {
   }
 
   unregister(): void {
-    const registration = registrations.get(this);
-    if (!registration) return;
-    registration.unregister();
+    // createFauxCore is fully local (no global registry), so there is nothing
+    // to unregister; dropping the reference is enough.
     registrations.delete(this);
   }
 }

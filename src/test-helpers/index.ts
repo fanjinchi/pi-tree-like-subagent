@@ -12,5 +12,6 @@ export { MockLLM, pushTask, responds, resumeTask, taskAsk, thinks } from "./mock
 export { MockUser, userCtrlC, userEsc, userPrompts } from "./mock-user.js";
 
 export { FAUX_MODEL, FauxProvider } from "./faux-provider.js";
-export { TestHarness } from "./harness.js";
+export { TestHarness, type TestHarnessOptions } from "./harness.js";
+export type { SessionStartEvent } from "@earendil-works/pi-coding-agent";
 export { node, TestNode } from "./test-tree.js";

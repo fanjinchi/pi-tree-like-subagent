@@ -75,6 +75,45 @@ describe("automated workflow", () => {
     }
   });
 
+  it("drains a batch queued in one reply back to back", async () => {
+    const h = await TestHarness.create();
+    // Two independent pushes in the same assistant reply: both are queued
+    // before the turn ends, and /auto runs them oldest first without any
+    // further mainline input between them.
+    h.llm.onPrompt(
+      "main work",
+      responds("working..."),
+      pushTask("AAA", "first prompt"),
+      pushTask("BBB", "second prompt"),
+    );
+    h.llm.onPrompt("first prompt", responds("first done"));
+    h.llm.onPrompt("[task-result: AAA]\n\nfirst done", responds("noted 1"));
+    h.llm.onPrompt("second prompt", responds("second done"));
+    h.llm.onPrompt("[task-result: BBB]\n\nsecond done", responds("noted 2"));
+
+    try {
+      await h.prompt("/auto");
+      await h.prompt("main work");
+      await h.waitForAutoParked();
+
+      assert.strictEqual(h.countBranchCustomEntries("task"), 2);
+      assert.strictEqual(h.countBranchCustomEntries("task-done"), 2);
+      h.assertSession(
+        user("main work"),
+        assistant("working...", "toolUse"),
+        task("AAA", "first prompt"),
+        task("BBB", "second prompt"),
+        taskResult("AAA", "first done"),
+        assistant("noted 1"),
+        taskResult("BBB", "second done"),
+        assistant("noted 2"),
+      );
+      h.assertStatus("[auto] suspended: BBB");
+    } finally {
+      h.dispose();
+    }
+  });
+
   it("warns and returns when /auto is already running", async () => {
     const h = await TestHarness.create();
     // Task rule first: the branch delivery carries the "[task-start: ...]"

@@ -246,7 +246,10 @@ describe("manual workflow", () => {
       // The aborted turn is still in the model's context for the post-result
       // turn (buildSessionContext includes it), so a real LLM tends to
       // continue the interrupted turn instead of processing the result.
+      // (0.87.1 prefixes a prompt-section diff message as an empty system
+      // message.)
       assert.deepStrictEqual(h.lastPromptMessages(), [
+        { role: "system", text: "" },
         { role: "user", text: "main work" },
         { role: "assistant", text: "working...", stopReason: "toolUse" },
         {
@@ -279,8 +282,10 @@ describe("manual workflow", () => {
         assistant("Great!"),
       );
       // The tool result now carries the start instruction, and no interruption
-      // warning fires for a clean mainline.
+      // warning fires for a clean mainline. (0.87.1 prefixes a prompt-section
+      // diff message as an empty system message.)
       assert.deepStrictEqual(h.lastPromptMessages(), [
+        { role: "system", text: "" },
         { role: "user", text: "main work" },
         { role: "assistant", text: "working...", stopReason: "toolUse" },
         {

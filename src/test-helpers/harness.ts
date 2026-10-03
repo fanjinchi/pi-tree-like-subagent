@@ -1,16 +1,22 @@
 import assert from "node:assert";
 
 import {
-  AuthStorage,
+  getCurrentSystemMessage,
+  getSystemMessageText,
+  InMemoryCredentialStore,
+} from "@earendil-works/pi-ai";
+import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
   ModelRegistry,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSession,
   type InputSource,
   type SessionEntry,
+  type SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
 
 // eslint-disable-next-line unslop/import-control -- extension factory not available via src test-helpers import chain
@@ -23,6 +29,17 @@ import { TestUi } from "./test-ui.js";
 import { FAUX_MODEL, FAUX_PROVIDER, FauxProvider, type PromptMessage } from "./faux-provider.js";
 import { MockLLM } from "./mock-llm.js";
 import { MockUser, type MockUserAction } from "./mock-user.js";
+
+export interface TestHarnessOptions {
+  /**
+   * Reason reported by the session_start frame emitted at bind time. Defaults
+   * to "resume" — the harness acts like a restored / non-fresh session, so
+   * /auto is never synthesized; that is the behavior all pre-existing tests
+   * assume. Pass `{ type: "session_start", reason: "startup" }` to simulate
+   * a production launch's first frame and exercise default-on auto.
+   */
+  sessionStartEvent?: SessionStartEvent;
+}
 
 export class TestHarness {
   private constructor(
@@ -37,14 +54,22 @@ export class TestHarness {
   ) {}
 
   get modelRegistry(): ModelRegistry {
-    return this.session.modelRegistry;
+    // ModelRegistry is a thin synchronous facade over the session's runtime.
+    return new ModelRegistry(this.session.modelRuntime);
   }
 
-  static async create(): Promise<TestHarness> {
+  static async create(options: TestHarnessOptions = {}): Promise<TestHarness> {
     const cwd = process.cwd();
     const agentDir = getAgentDir();
-    const authStorage = AuthStorage.inMemory();
-    const modelRegistry = ModelRegistry.inMemory(authStorage);
+    // pi 0.87.1 builds the model/auth runtime instead of a bare registry: an
+    // in-memory credential store keeps tests off ~/.pi/agent, and with no
+    // modelsPath nothing is read from or written to disk.
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+      allowModelNetwork: false,
+      refreshOnCreate: false,
+    });
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: false },
       retry: { enabled: false },
@@ -88,18 +113,29 @@ export class TestHarness {
     const { session } = await createAgentSession({
       cwd,
       agentDir,
-      authStorage,
-      modelRegistry,
+      modelRuntime,
       resourceLoader,
       sessionManager,
       settingsManager,
       model: FAUX_MODEL,
       thinkingLevel: "off" as const,
       noTools: "builtin",
+      // Default to a non-fresh frame: pre-existing tests must never see the
+      // synthesized /auto. "resume" is a legal reason (types.d.ts) and
+      // matches the harness acting as a restored session.
+      sessionStartEvent: options.sessionStartEvent ?? {
+        type: "session_start",
+        reason: "resume",
+      },
     });
 
     const testSession = new TestSession(sessionManager);
     const testUi = new TestUi();
+    // No sendUserMessage patch needed: pi 0.87.1+ forwards expandPromptTemplates
+    // natively and defers prompts emitted mid-settle (they run after the
+    // agent_settled emission finishes), so the harness drives the same
+    // extension-command dispatch the running app performs.
+
     const harness = new TestHarness(
       llm,
       user,
@@ -227,9 +263,16 @@ export class TestHarness {
     return this.session.getActiveToolNames().slice().sort();
   }
 
-  /** The current effective system prompt (for byte-stability assertions). */
+  /** The current effective system prompt (for byte-stability assertions).
+   *
+   * 0.87.1 keeps the prompt as structured sections and patches them via
+   * mid-conversation system messages (never a literal trailing append), so the
+   * text a run actually sees is the replayed merge of every system message in
+   * the transcript — render exactly that.
+   */
   systemPromptText(): string {
-    return this.session.systemPrompt;
+    const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
+    return current ? getSystemMessageText(current) : "";
   }
 
   /** Force the active tool set (bypasses branch visibility sync in tests). */
@@ -286,6 +329,12 @@ export class TestHarness {
   private async scanAndReactLoop(): Promise<void> {
     await flushMicrotasks();
     await this.session.agent.waitForIdle();
+    // pi 0.87.1 keeps isStreaming true until the settle emission (and its
+    // deferred prompts) finish. Agent-level idle alone lets a reaction prompt
+    // fire too early (session.prompt throws while streaming) and lets the
+    // supervisor loop navigate too early (navigateTree throws too). Only the
+    // session-level idle promise covers the settle window.
+    await this.session.waitForIdle();
 
     let reacted: boolean;
     do {
@@ -339,6 +388,19 @@ export class TestHarness {
       source: "test" as InputSource,
     });
     await this.session.agent.waitForIdle();
+    // pi 0.87.1: agent runs triggered inside extension commands are dispatched
+    // with their own settle cadence (deferred prompt queue flushed after the
+    // command turn's settle emission), so the idles above can resolve before
+    // the run's messages land on the branch. Drain until no new entries appear
+    // for a full idle cycle, then do a final error sweep.
+    for (let i = 0; i < 5; i++) {
+      await this.session.agent.waitForIdle();
+      await this.session.waitForIdle();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (this.sessionManager.getEntries().every((entry) => knownEntryIds.has(entry.id))) {
+        break;
+      }
+    }
     this.throwIfNewAssistantError(knownEntryIds);
   }
 

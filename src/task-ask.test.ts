@@ -46,8 +46,8 @@ describe("task-ask", () => {
       assert.ok(!branchTools.includes("push-task"), "push-task hidden in branch");
       assert.ok(!branchTools.includes("resume-task"), "resume-task hidden in branch");
       assert.ok(
-        h.systemPromptText().endsWith(TASK_BRANCH_SYSTEM_PROMPT),
-        "branch block appended in branch",
+        h.systemPromptText().includes(TASK_BRANCH_SYSTEM_PROMPT),
+        "branch block present in branch",
       );
 
       await h.prompt("/finish-task");
@@ -75,7 +75,7 @@ describe("task-ask", () => {
       await h.prompt("main work");
       await h.prompt("/start-task");
       const firstBranchPrompt = h.systemPromptText();
-      assert.ok(firstBranchPrompt.endsWith(TASK_BRANCH_SYSTEM_PROMPT));
+      assert.ok(firstBranchPrompt.includes(TASK_BRANCH_SYSTEM_PROMPT));
       assert.ok(!firstBranchPrompt.includes("prompt aaa"), "title stays out of the prompt");
 
       await h.prompt("/finish-task");

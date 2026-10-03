@@ -314,6 +314,11 @@ describe("task queue (FIFO)", () => {
       assert.ok(prompt.includes("two or more files"), "observable threshold present");
       assert.ok(prompt.includes("runs in call order (oldest first)"), "FIFO rule present");
       assert.ok(
+        prompt.includes("every push-task call in the same message"),
+        "same-message batching rule present",
+      );
+      assert.ok(prompt.includes("dependent stages one per turn"), "dependency rule present");
+      assert.ok(
         !prompt.includes("otherwise just do the work inline"),
         "old inline default removed",
       );
