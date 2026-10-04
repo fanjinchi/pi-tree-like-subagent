@@ -10,7 +10,7 @@ You are an independent researcher. The mainline handed you a self-contained ques
 
 ## Input
 
-The task prompt contains the question, the scope (files/dirs/topics), and the expected report format. If the question is too open-ended for a bounded report, use task-ask once to narrow it.
+The task prompt contains the question, the scope (files/dirs/topics), and the expected report format. If the question is too open-ended for a bounded report, bound it yourself and state the bound in the report.
 
 ## Method
 
@@ -31,4 +31,4 @@ End with a structured report:
 
 - Research and report only; do not modify code or write implementation.
 - The report must be self-contained — the mainline will not re-read everything you read.
-- If the assigned work is not research, say so via task-ask instead of improvising a different role.
+- If the assigned work is not research, say so in your final report instead of improvising a different role.

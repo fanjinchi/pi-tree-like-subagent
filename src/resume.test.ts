@@ -7,7 +7,6 @@ import {
   responds,
   resumeTask,
   task,
-  taskAsk,
   taskResult,
   user,
   TestHarness,
@@ -190,7 +189,6 @@ describe("resume-task", () => {
       [responds("done")],
     ]);
     h.llm.onPrompt("[task-result: AAA]\n\ndone", responds("noted"));
-    h.llm.onPromptSequence("mainline ask", [[taskAsk("question from mainline")], [responds("ok")]]);
 
     try {
       await h.prompt("main work");
@@ -221,20 +219,6 @@ describe("resume-task", () => {
       assert.strictEqual(h.countAllCustomEntries("task"), 1);
 
       await h.prompt("/finish-task");
-
-      // task-ask is hidden outside branches; force-activate to reach the guard.
-      h.setActiveToolNames([...h.activeToolNames(), "task-ask"]);
-      await h.prompt("mainline ask");
-      const mainlineMessages = h.lastPromptMessages() ?? [];
-      assert.ok(
-        mainlineMessages.some(
-          (m) =>
-            m.role === "toolResult" &&
-            m.text.includes("task-ask is only available inside a task branch"),
-        ),
-        "task-ask guard error missing",
-      );
-      assert.strictEqual(h.countAllCustomEntries("task-ask"), 0);
     } finally {
       h.dispose();
     }
@@ -303,8 +287,6 @@ describe("resume-task", () => {
     try {
       await h.prompt("main work");
       await h.prompt("/start-task");
-      // Stop the relay: this test consumes the queued request by hand.
-      await h.prompt("/auto-stop");
       await h.prompt("/finish-task");
       // The result turn queued a resume request for a title that does not exist.
       assert.strictEqual(h.countBranchCustomEntries("task-resume"), 1);

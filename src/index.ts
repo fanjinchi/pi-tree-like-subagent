@@ -9,11 +9,15 @@ import { fileURLToPath } from "node:url";
 import {
   createSyntheticSourceInfo,
   defineTool,
+  type AgentBeforeSettleEvent,
+  type AgentBeforeSettleEventResult,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ExtensionContext,
   type MessageRenderer,
   type ModelRegistry,
   type RegisteredCommand,
+  type SessionBoundaryDraft,
   type SessionEntry,
   type SessionMessageEntry,
   type Skill,
@@ -35,6 +39,55 @@ import { renderTextContent, taskResultTextContent } from "./text-content.js";
  * cross-referencing skill graph must not balloon the branch prompt.
  */
 export const MAX_INLINED_ROLE_SKILLS = 4;
+
+/**
+ * Fork branches inherit the mainline transcript, including the push-task
+ * call. The framing is the only place a flat (non-TUI) run learns its
+ * identity — the task-branch system-prompt section never appears there — so
+ * every load-bearing rule lives here, not only in TASK_BRANCH_SYSTEM_PROMPT.
+ */
+export const TASK_START_FRAMING_FORK =
+  "This task is running now: the push-task call above only queued it and it has since been started. " +
+  "Never say or imply the task is still queued, waiting to be started, or needs /start-task, /auto, or any user action. " +
+  "The conversation above is the mainline context that produced the task - use it as background, do not redo it. " +
+  "Mode blocks (plan mode, ACP) and their rules still apply. " +
+  "Execute the task below; your final assistant message is the report to the mainline.\n\n";
+
+/** Fresh branches start from an empty context, so the framing must not claim otherwise. */
+export const TASK_START_FRAMING_FRESH =
+  "This task is running now: it was queued on the mainline and started here from a fresh context. " +
+  "Never say or imply the task is still queued, waiting to be started, or needs /start-task, /auto, or any user action. " +
+  "Mode blocks (plan mode, ACP) and their rules still apply. " +
+  "Execute the task below; your final assistant message is the report to the mainline.\n\n";
+
+/** Resume deliveries carry follow-up input, not a new task. */
+export const TASK_RESUME_FRAMING =
+  "This task is running again: the mainline started it here and sent the input below as follow-up " +
+  "(review findings or a correction). Continue the same task - this is new input, not a new task. " +
+  "Your final assistant message is the report to the mainline.\n\n";
+
+/**
+ * Appended to the system prompt inside a task branch. A branch inherits the
+ * mainline transcript *and* its system prompt, so nothing else in the prompt
+ * tells the model that the task it can see being queued is already running -
+ * without this block the model can conclude it is still on the mainline and
+ * that the task has not been started.
+ *
+ * Static text only: a task title here would break the two byte-stable system
+ * prompts (mainline / task branch) that the cache depends on. Titles travel in
+ * the branch-tip delivery message instead (see taskStartMarker).
+ */
+export const TASK_BRANCH_SYSTEM_PROMPT = `# Task branch
+
+You are inside a queued task branch: this task is already running. The mainline queued it with push-task and started it here; the mainline is blocked while you work and receives only your final message, as the task result.
+
+- Never report that no task is running, and never ask for this task to be started - it is live now.
+- The push-task / resume-task tool descriptions in this prompt describe the mainline; those tools are not available in this branch.
+- A "Task stored ... \`/start-task\` ..." receipt in the history above was written for the mainline before this task started; it is not a statement that this task is unstarted.
+- Questions for the mainline cannot be relayed from a task branch: state blockers and open questions in your final message; the mainline reads it as the task result.
+- Mode rules stated elsewhere in this prompt (for example plan mode) stay in force in this branch; if they forbid what this task asks for, name the conflict in your final message instead of doing forbidden work.
+- Work to completion and make your final message the full report.
+`;
 
 export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
   return defineTool({
@@ -135,8 +188,8 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
       "Queue a resume of a finished, aborted, or suspended task branch, carrying a message (e.g. review findings) back into the task context.",
     promptSnippet: "Queue a resume of a suspended task branch with a message.",
     promptGuidelines: [
-      "Use resume-task to send follow-up input (review findings, answers, corrections) into a task branch that finished, aborted, or was suspended.",
-      "resume-task queues the resume; while a task supervisor is running it executes automatically (supervision is armed by /start-task, /resume-task, and /auto, and stopped by /auto-stop); with supervision off it takes effect when the user runs /resume-task or /auto.",
+      "Use resume-task to send follow-up input (review findings or corrections) into a task that finished, aborted, or was suspended.",
+      "resume-task queues the resume; while auto mode is on it executes automatically (auto is armed by /auto and stopped by /auto-stop); with auto off it takes effect when the user runs /resume-task or /auto.",
       "resume-task notifies the user itself; do not write any further text in the same turn after calling it.",
       "Do not batch multiple resume-task calls together, and do not mix resume-task with other tool calls in the same turn.",
     ],
@@ -167,8 +220,7 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
         message: params.message,
       });
 
-      // Relay-aware, but branch-tip only (never part of a system prompt).
-      const armed = isSupervisorActive(ctx.sessionManager);
+      const armed = isAutoActive(ctx.sessionManager);
       const resumeQueuedMessage = armed
         ? "Resume queued. It is executed automatically."
         : "Resume queued. It takes effect via `/resume-task` or `/auto`.";
@@ -200,65 +252,6 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
   });
 }
 
-export function toolTaskAsk(pi: TaskAskAPI): ToolDefinition {
-  return defineTool({
-    name: "task-ask",
-    label: "Task Ask",
-    description:
-      "Ask the mainline orchestrator a question from inside a task branch. The task suspends and the question is relayed to the mainline automatically; the answer arrives as a resume message.",
-    promptSnippet: "Ask the mainline orchestrator a question from inside a task branch.",
-    promptGuidelines: [
-      "Use task-ask only inside a task branch when you need information or a decision from the mainline orchestrator to continue the task.",
-      "After calling task-ask, stop working and wait: the question is recorded and relayed to the mainline automatically (unless the relay was stopped with /auto-stop, in which case the user relays it with /suspend-task); the answer arrives as a resume message. Do not call other tools alongside task-ask.",
-      "If the question needs a human answer and a user-question tool (such as ask_user_question) is available, prefer it over relaying through the mainline - it works inside task branches and resumes your turn directly.",
-      "task-ask is not for the final report - the last assistant message of a task is its report.",
-    ],
-    parameters: taskAskParameters,
-    renderCall(args: TaskAskParams, theme, context) {
-      const header = theme.fg("toolTitle", theme.bold("task-ask"));
-      return renderCollapsibleToolCall(header, args.question, theme, context.expanded);
-    },
-    renderResult() {
-      return new Text("", 0, 0);
-    },
-    async execute(_toolCallId, params: TaskAskParams, signal, _onUpdate, ctx) {
-      if (signal?.aborted) {
-        throw new Error("Task question aborted.");
-      }
-
-      if (!currentTask(ctx.sessionManager)) {
-        throw new Error("task-ask is only available inside a task branch.");
-      }
-
-      pi.appendEntry(TASK_ASK_ENTRY_TYPE, { question: params.question });
-
-      if (ctx.hasUI) {
-        // Branch-tip text only (never part of a system prompt), so it may
-        // reflect the live supervisor state.
-        ctx.ui.notify(
-          isSupervisorActive(ctx.sessionManager)
-            ? "Task question recorded. The task suspends and the question is relayed to the mainline automatically."
-            : "Task question recorded. Run /suspend-task to relay it, or answer it directly in this branch.",
-          "info",
-        );
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: isSupervisorActive(ctx.sessionManager)
-              ? "Question recorded; the task is now waiting for an answer. It is suspended and relayed to the mainline orchestrator automatically. The answer arrives as a resume message. Stop working until the answer arrives."
-              : "Question recorded; the task is now waiting for an answer. The user may relay it with /suspend-task or answer directly in this branch. The answer arrives as a resume message. Stop working until the answer arrives.",
-          },
-        ],
-        details: { question: params.question },
-        terminate: true,
-      };
-    },
-  });
-}
-
 export function cmdStartTask(pi: TaskCommandAPI): CommandOptions {
   return {
     description: "Navigate to a fresh context and inject the active task prompt",
@@ -268,14 +261,11 @@ export function cmdStartTask(pi: TaskCommandAPI): CommandOptions {
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       await ctx.waitForIdle();
-      const modelArg = args.trim() || undefined;
-      const result = await startTask(pi, ctx, { modelArg });
-      // Starting a task arms the supervisor in relay policy: from here on,
-      // a task-ask switches back to the mainline by itself and the answer
-      // comes back without the user running /suspend-task or /resume-task.
-      if (result === "started" || result === "launch-timeout") {
-        armSupervisor(pi, ctx, "relay");
+      if (ctx.mode !== "tui") {
+        throw new Error(TREE_COMMAND_TUI_ONLY);
       }
+      const modelArg = args.trim() || undefined;
+      await startTask(pi, ctx, { modelArg });
     },
   };
 }
@@ -285,6 +275,9 @@ export function cmdDiscardTask(pi: TaskCommandAPI): CommandOptions {
     description: "Discard the active task without executing it",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       await ctx.waitForIdle();
+      if (ctx.mode !== "tui") {
+        throw new Error(TREE_COMMAND_TUI_ONLY);
+      }
       await discardTask(pi, ctx);
     },
   };
@@ -295,6 +288,9 @@ export function cmdFinishTask(pi: TaskCommandAPI): CommandOptions {
     description: "Finish the current task and return to the task start point",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       await ctx.waitForIdle();
+      if (ctx.mode !== "tui") {
+        throw new Error(TREE_COMMAND_TUI_ONLY);
+      }
       await finishTask(pi, ctx);
     },
   };
@@ -305,6 +301,9 @@ export function cmdAbortTask(pi: TaskCommandAPI): CommandOptions {
     description: "Abort the current task without finishing",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       await ctx.waitForIdle();
+      if (ctx.mode !== "tui") {
+        throw new Error(TREE_COMMAND_TUI_ONLY);
+      }
       await abortTask(pi, ctx);
     },
   };
@@ -316,12 +315,10 @@ export function cmdResumeTask(pi: TaskCommandAPI): CommandOptions {
       "Resume the most recently suspended task branch (or a queued resume-task request), optionally with an extra message",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       await ctx.waitForIdle();
-      const result = await resumeTask(pi, ctx, { messageArg: args });
-      // Re-arm the relay: the resumed run keeps asking questions and getting
-      // answers without manual /suspend-task and /resume-task calls.
-      if (result === "started" || result === "launch-timeout") {
-        armSupervisor(pi, ctx, "relay");
+      if (ctx.mode !== "tui") {
+        throw new Error(TREE_COMMAND_TUI_ONLY);
       }
+      await resumeTask(pi, ctx, { messageArg: args });
     },
   };
 }
@@ -329,9 +326,12 @@ export function cmdResumeTask(pi: TaskCommandAPI): CommandOptions {
 export function cmdSuspendTask(pi: TaskCommandAPI): CommandOptions {
   return {
     description:
-      "Suspend the current task and return to the mainline (relays a pending task-ask question)",
+      "Suspend the current task and return to the mainline (TUI; the task stays resumable via resume-task)",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       await ctx.waitForIdle();
+      if (ctx.mode !== "tui") {
+        throw new Error(TREE_COMMAND_TUI_ONLY);
+      }
       await suspendTask(pi, ctx);
     },
   };
@@ -339,9 +339,9 @@ export function cmdSuspendTask(pi: TaskCommandAPI): CommandOptions {
 
 /**
  * Wire the task supervisor's session events. Registered once at extension
- * load (root index.ts) instead of by the /auto command, so a relay
- * supervisor armed by /start-task or /resume-task gets the same wake and
- * shutdown handling without /auto ever having been run.
+ * load (root index.ts) instead of by the /auto command, so a supervisor
+ * armed later gets the same wake and shutdown handling without /auto ever
+ * having been run.
  */
 export function setupTaskSupervisor(pi: Pick<ExtensionAPI, "on">): void {
   // The barrier resolves when Pi reports the run as active. Comparing the
@@ -381,7 +381,7 @@ export function cmdAuto(pi: TaskCommandAPI): CommandOptions {
   return {
     description: "Turn on auto mode: queued tasks run and finish automatically until /auto-stop",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      const result = armSupervisor(pi, ctx, "auto");
+      const result = armSupervisor(pi, ctx);
       if (result === "already-auto") {
         ctx.ui.notify("Auto mode is already on.", "warning");
         return;
@@ -400,7 +400,7 @@ export function cmdAuto(pi: TaskCommandAPI): CommandOptions {
 
 export function cmdAutoStop(): CommandOptions {
   return {
-    description: "Turn supervision off (stops the /auto loop and the ask relay)",
+    description: "Turn auto mode off (stops the /auto supervision loop)",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       const state = supervisorStates.get(ctx.sessionManager);
       if (!state?.stop) {
@@ -408,12 +408,9 @@ export function cmdAutoStop(): CommandOptions {
         return;
       }
 
-      const mode = state.mode;
       state.stop();
       ctx.ui.notify(
-        mode === "relay"
-          ? "Ask relay off. Task questions stay in the branch until /suspend-task; the next /start-task or /resume-task re-arms the relay."
-          : "Auto mode off. It stops before the next step; the current task stays resumable.",
+        "Auto mode off. It stops before the next step; the current task stays resumable.",
         "info",
       );
     },
@@ -431,21 +428,6 @@ export const rendererTaskResult: MessageRenderer<{ title?: string }> = (
   // The marker is for the model (customType is lost in context); the label
   // already carries the title in the UI, so strip it here.
   const text = renderTextContent(message.content).replace(/^\[task-result: [^\]\n]*\]\n\n/, "");
-  const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
-  box.addChild(new Text(`${label}\n${text}`, 0, 0));
-  return box;
-};
-
-export const rendererTaskQuestion: MessageRenderer<{ title?: string; question?: string }> = (
-  message,
-  _options,
-  theme,
-): Box => {
-  const label = message.details?.title
-    ? theme.fg("customMessageLabel", `${message.details.title} question:`)
-    : theme.fg("customMessageLabel", "question:");
-  // Same stripping as rendererTaskResult: the label already shows the title.
-  const text = renderTextContent(message.content).replace(/^\[task-question: [^\]\n]*\]\n\n/, "");
   const box = new Box(1, 1, (t: string) => theme.bg("customMessageBg", t));
   box.addChild(new Text(`${label}\n${text}`, 0, 0));
   return box;
@@ -473,34 +455,15 @@ export function captureToolOrder(activeTools: string[]): void {
 }
 
 /**
- * Show task-ask inside task branches and push-task/resume-task outside them.
- * Session-level only (setActiveTools does not persist); execute-time guards
- * in the tools remain as a backstop for races. Tools the user disabled
- * before capture are not force-enabled; tools registered after capture keep
- * their relative order at the end.
+ * Hide the mainline-only tools (push-task/resume-task) inside task branches
+ * and show the full canonical set on the mainline. Session-level only
+ * (setActiveTools does not persist); execute-time guards in the tools remain
+ * as a backstop for races. Tools the user disabled before capture are not
+ * force-enabled; tools registered after capture keep their relative order at
+ * the end.
  */
 export function syncTaskToolVisibility(pi: ToolVisibilityAPI, session: ReadonlySessionLike): void {
-  const active = pi.getActiveTools();
-  canonicalToolOrder ??= active;
-
-  const inTaskBranch = currentTask(session) !== null;
-  const hidden = inTaskBranch ? MAINLINE_ONLY_TOOLS : TASK_BRANCH_ONLY_TOOLS;
-  const shown = inTaskBranch ? TASK_BRANCH_ONLY_TOOLS : MAINLINE_ONLY_TOOLS;
-
-  const desired = new Set(active.filter((name) => !hidden.includes(name)));
-  for (const name of shown) {
-    if (canonicalToolOrder.includes(name)) desired.add(name);
-  }
-
-  const next = canonicalToolOrder.filter((name) => desired.has(name));
-  for (const name of active) {
-    if (!canonicalToolOrder.includes(name) && desired.has(name)) next.push(name);
-  }
-
-  const unchanged = next.length === active.length && next.every((name, i) => name === active[i]);
-  if (!unchanged) {
-    pi.setActiveTools(next);
-  }
+  applyTaskToolSet(pi, currentTask(session) !== null);
 }
 
 export function setModelRegistry(mr: ModelRegistry): void {
@@ -516,11 +479,6 @@ export function taskResultMarker(title: string): string {
   return `[task-result: ${title}]\n\n`;
 }
 
-/** Marker injected before a relayed task question. See taskResultMarker. */
-export function taskQuestionMarker(title: string): string {
-  return `[task-question: ${title}]\n\n`;
-}
-
 /** Marker injected before a started task's prompt. See taskResultMarker. */
 export function taskStartMarker(title: string): string {
   return `[task-start: ${title}]\n\n`;
@@ -530,46 +488,6 @@ export function taskStartMarker(title: string): string {
 export function taskResumeMarker(title: string): string {
   return `[task-resume: ${title}]\n\n`;
 }
-
-/** Fork branches inherit the mainline transcript, including the push-task call. */
-export const TASK_START_FRAMING_FORK =
-  "This task is running now: the push-task call above only queued it and it has since been started. " +
-  "The conversation above is the mainline context that produced the task - use it as background, do not redo it. " +
-  "Execute the task below; your final message is the report to the mainline.\n\n";
-
-/** Fresh branches start from an empty context, so the framing must not claim otherwise. */
-export const TASK_START_FRAMING_FRESH =
-  "This task is running now: it was queued on the mainline and started here from a fresh context. " +
-  "Do not wait for or request a start. Execute the task below; your final message is the report to the mainline.\n\n";
-
-/** Resume deliveries carry follow-up input, not a new task. */
-export const TASK_RESUME_FRAMING =
-  "This task is running again: the mainline started it here and sent the input below as follow-up " +
-  "(review findings, an answer, or a correction). Continue the same task - this is new input, not a new task. " +
-  "Your final message is the report to the mainline.\n\n";
-
-/**
- * Appended to the system prompt inside a task branch. A branch inherits the
- * mainline transcript *and* its system prompt, so nothing else in the prompt
- * tells the model that the task it can see being queued is already running -
- * without this block the model can conclude it is still on the mainline and
- * that the task has not been started.
- *
- * Static text only: a task title here would break the two byte-stable system
- * prompts (mainline / task branch) that the cache depends on. Titles travel in
- * the branch-tip delivery message instead (see taskStartMarker).
- */
-export const TASK_BRANCH_SYSTEM_PROMPT = `# Task branch
-
-You are inside a queued task branch: this task is already running. The mainline queued it with push-task and started it here; the mainline is blocked while you work and receives only your final message, as the task result.
-
-- Never report that no task is running, and never ask for this task to be started - it is live now.
-- The push-task / resume-task tool descriptions in this prompt describe the mainline; those tools are not available in this branch.
-- A "Task stored ... \`/start-task\` ..." receipt in the history above was written for the mainline before this task started; it is not a statement that this task is unstarted.
-- Use task-ask if that tool is available and a question blocks progress; otherwise state the blocker in your final message.
-- Mode rules stated elsewhere in this prompt (for example plan mode) stay in force in this branch; if they forbid what this task asks for, name the conflict in your final message instead of doing forbidden work.
-- Work to completion and make your final message the full report.
-`;
 
 /** The system-prompt text appended inside a task branch ("" on the mainline). */
 export function taskBranchSystemPromptAppend(session: ReadonlySessionLike): string {
@@ -590,31 +508,6 @@ export function refreshTaskStatus(ctx: TaskStatusContext, options: TaskStatusOpt
   }
 }
 
-/**
- * The widget key of the persistent in-branch indicator above the editor.
- *
- * The footer status line is the bottom-most element of the dock: on short
- * terminals (phones with a soft keyboard) it is the first thing squeezed off
- * the screen, so the branch marker must not live only there. While the
- * current session is inside a task branch, a widget pinned above the input
- * box states it; everywhere else the widget is cleared. Guarded by the same
- * `currentTask` predicate as the branch system-prompt append, so the widget
- * and the prompt variant can never disagree.
- */
-function syncTaskBranchWidget(ctx: TaskStatusContext): void {
-  const active = currentTask(ctx.sessionManager);
-  // Folded marker-safe variant: a multi-line/whitespace-only title would
-  // otherwise render a multi-line widget line (Text renders each element on
-  // one row) and defeat the widget's purpose on short phone terminals. The
-  // footer status keeps the bare taskTitle() — pre-existing behavior.
-  const title = active ? taskMarkerTitle(active.data.title) || "untitled" : undefined;
-  ctx.ui.setWidget(
-    "task-branch",
-    title === undefined ? undefined : [`${ctx.ui.theme.fg("warning", "任务分支")}: ${title}`],
-    { placement: "aboveEditor" },
-  );
-}
-
 export function updateTaskStatus(
   session: ReadonlySessionLike,
   setStatus: (key: string, value: string | undefined) => void,
@@ -623,17 +516,6 @@ export function updateTaskStatus(
 ): void {
   const prefix = options.prefix ?? "";
   const suspended = latestSuspendedTask(session);
-
-  // A relayed question outranks queued-but-unstarted work: while the relay is
-  // answering it, "awaiting answer" is the state that needs attention (a
-  // batch run would otherwise keep showing "pending task: ..." instead).
-  if (suspended?.data.reason === "ask") {
-    setStatus(
-      "task",
-      `${prefix}${theme.fg("muted", `awaiting answer: ${taskTitle(suspended.data.title)}`)}`,
-    );
-    return;
-  }
 
   const pending = pendingTasks(session);
   if (pending.length > 0) {
@@ -659,8 +541,8 @@ export function updateTaskStatus(
     return;
   }
 
-  // Suspended runs are resumable checkpoints (relayed questions were handled
-  // above). Shown in muted so the actionable states above stay dominant.
+  // Suspended runs are resumable checkpoints. Shown in muted so the
+  // actionable states above stay dominant.
   if (suspended) {
     setStatus(
       "task",
@@ -694,18 +576,8 @@ export function findOwnSkillFile(
   return undefined;
 }
 
-/** Whether auto mode is on (a supervisor loop armed in `auto` policy). */
+/** Whether auto mode is on (a supervisor loop is armed for this session). */
 export function isAutoActive(sessionManager: object): boolean {
-  const state = supervisorStates.get(sessionManager);
-  return state?.stop !== undefined && state.mode === "auto";
-}
-
-/**
- * Whether any supervisor loop is armed for this session (auto or relay).
- * Relay-aware wording uses this; the "[auto] " status prefix stays bound to
- * isAutoActive.
- */
-export function isSupervisorActive(sessionManager: object): boolean {
   return supervisorStates.get(sessionManager)?.stop !== undefined;
 }
 
@@ -716,8 +588,8 @@ export function isSupervisorActive(sessionManager: object): boolean {
  * the detached loop, so tests need a barrier before asserting.
  *
  * Note: this only guarantees "parked", not "drained" - the loop parks at the
- * end of every iteration (a relay supervisor parks after each suspend and
- * each resume), so assert on stable points and never on this barrier alone.
+ * end of every iteration, so assert on stable points and never on this
+ * barrier alone.
  */
 export function whenAutoParked(sessionManager: object): Promise<void> {
   const state = supervisorStates.get(sessionManager);
@@ -728,17 +600,49 @@ export function whenAutoParked(sessionManager: object): Promise<void> {
 }
 
 /**
- * Relay instructions appended to an injected task question (after the
- * question text). Exported so tests can strip them in sync with production.
+ * agent_before_settle handler: with auto supervision armed outside the TUI,
+ * run exactly one supervisor action per boundary (ABORT-CLOSE > FINISH >
+ * RESUME > START) via boundary drafts, so pi
+ * continues the run instead of emitting agent_settled between queue steps.
+ * agent_settled then fires exactly once — when the queue is truly drained.
+ * The TUI is exempt: tree navigation exists there and the supervisor loop
+ * drains after the settle as before.
  */
-export const taskQuestionInstructions =
-  "(The task is suspended waiting for this answer. Answer it here, then call resume-task with the answer in `message` to resume the task; if you cannot answer, ask the user - with a user-question tool if one is available, otherwise in plain text - and relay their answer the same way.)";
+export async function handleTaskBoundary(
+  pi: TaskCommandAPI,
+  event: AgentBeforeSettleEvent,
+  ctx: ExtensionContext,
+): Promise<AgentBeforeSettleEventResult | undefined> {
+  if (ctx.mode === "tui") return undefined;
+  const state = supervisorStates.get(ctx.sessionManager);
+  if (!state?.stop) return undefined;
 
-// ── Tool visibility sync ──────────────────────────────────────────
+  try {
+    const action = await boundaryDrainAction(pi, ctx);
+    if (!action) return undefined;
+    // emitBoundary has replace semantics: earlier handlers' drafts must be
+    // re-included or they are dropped.
+    return {
+      entries: [...(event.entries ?? []), ...action.drafts],
+      continue: action.runContinuation || event.continue || undefined,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      ctx.ui.notify(`Task boundary drain failed: ${message}`, "error");
+    } catch {
+      // UI is gone; the settle proceeds honestly either way.
+    }
+    return undefined;
+  }
+}
 
-const TASK_BRANCH_ONLY_TOOLS = ["task-ask"];
+// ─── Boundary drain (non-TUI flat mode) ────────────────────────────────
 
-const MAINLINE_ONLY_TOOLS = ["push-task", "resume-task"];
+/** Shared non-TUI error for commands that navigate the session tree. */
+const TREE_COMMAND_TUI_ONLY =
+  "This command navigates the session tree and is only available in the TUI. " +
+  "Outside the TUI, queued work is driven by the push-task / resume-task tools and /auto.";
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
@@ -763,15 +667,34 @@ type TaskActionOptions = {
   waitForAgentStart?: (taskStartId: string) => Promise<boolean>;
 };
 
-type ToolVisibilityAPI = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">;
-
 type ResumeTaskParams = Static<typeof resumeTaskParameters>;
-
-type TaskAskParams = Static<typeof taskAskParameters>;
 
 type ResumeTaskAPI = Pick<ExtensionAPI, "appendEntry">;
 
-type TaskAskAPI = Pick<ExtensionAPI, "appendEntry">;
+/**
+ * The widget key of the persistent in-branch indicator above the editor.
+ *
+ * The footer status line is the bottom-most element of the dock: on short
+ * terminals (phones with a soft keyboard) it is the first thing squeezed off
+ * the screen, so the branch marker must not live only there. While the
+ * current session is inside a task branch, a widget pinned above the input
+ * box states it; everywhere else the widget is cleared. Guarded by the same
+ * `currentTask` predicate as the branch system-prompt append, so the widget
+ * and the prompt variant can never disagree.
+ */
+function syncTaskBranchWidget(ctx: TaskStatusContext): void {
+  const active = currentTask(ctx.sessionManager);
+  // Folded marker-safe variant: a multi-line/whitespace-only title would
+  // otherwise render a multi-line widget line (Text renders each element on
+  // one row) and defeat the widget's purpose on short phone terminals. The
+  // footer status keeps the bare taskTitle() — pre-existing behavior.
+  const title = active ? taskMarkerTitle(active.data.title) || "untitled" : undefined;
+  ctx.ui.setWidget(
+    "task-branch",
+    title === undefined ? undefined : [`${ctx.ui.theme.fg("warning", "任务分支")}: ${title}`],
+    { placement: "aboveEditor" },
+  );
+}
 
 type TaskStatusContext = Pick<ExtensionCommandContext, "hasUI" | "sessionManager" | "ui">;
 
@@ -831,17 +754,21 @@ async function abortTask(
 
   const branchLeafId = ctx.sessionManager.getLeafId()!;
 
+  // Abort produces no result but stays resumable: the task entry is not
+  // consumed, keeping "abort = task pending again". The checkpoint must be
+  // captured before navigation — after navigateTree the session sits on the
+  // mainline branch, whose last assistant text is not the task's.
+  const checkpoint = lastAssistantText(ctx.sessionManager);
+
   const result = await ctx.navigateTree(taskStart.data.returnTo, {
     summarize: false,
   });
   if (result.cancelled) return "cancelled";
 
-  // Abort produces no result but stays resumable: the task entry is not
-  // consumed, keeping "abort = task pending again".
   pi.appendEntry(TASK_SUSPENDED_ENTRY_TYPE, {
     title: taskMarkerTitle(taskStart.data.title),
     branchLeafId,
-    reason: "abort",
+    ...(checkpoint !== undefined ? { content: checkpoint } : {}),
     ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
   });
   syncTaskToolVisibility(pi, ctx.sessionManager);
@@ -869,11 +796,490 @@ function getModelCompletions(argumentPrefix: string, registry: ModelRegistry): A
 }
 
 /**
+ * The one action this boundary performs, or null to let the run settle.
+ * Deliveries travel as trailing custom_message drafts, never as queued
+ * follow-ups: pi commits the drafts and refreshes the agent state from the
+ * projection before deciding to continue, so the continued run starts from
+ * the delivery itself. A queued follow-up would race pi's hasQueuedMessages
+ * check and, worse, Agent.continue() from the toolResult-terminated
+ * push-task turn would resume the stale in-flight tool loop first.
+ */
+async function boundaryDrainAction(
+  pi: TaskCommandAPI,
+  ctx: ExtensionContext,
+): Promise<{ drafts: SessionBoundaryDraft[]; runContinuation: boolean } | null> {
+  const session = ctx.sessionManager;
+  const aborted = lastAssistantWasAborted(session);
+  const taskStart = currentTask(session);
+
+  // 0. ABORT-CLOSE: an aborted run with an open task epoch. Close the books
+  // (checkpoint preserved for a later resume), erase the half-finished
+  // transcript, and settle honestly — the epoch no longer looks active to
+  // later prompts, so their boundaries never misread it as finishable.
+  if (taskStart && aborted) {
+    const title = taskMarkerTitle(taskStart.data.title) || "untitled";
+    const checkpoint = lastAssistantText(session);
+    const doneData: TaskDoneData = {
+      title,
+      ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+      branchLeafId: session.getLeafId() ?? "",
+      ...(checkpoint !== undefined ? { content: checkpoint } : {}),
+      reason: "aborted",
+    };
+    const drafts: SessionBoundaryDraft[] = [
+      { type: "custom", customType: TASK_DONE_ENTRY_TYPE, data: doneData },
+    ];
+    if (taskStart.data.fork !== true && taskStart.data.restoreFromEntryId) {
+      drafts.push(restoreCompactionDraft(taskStart.data));
+    }
+    drafts.push(...collectTranscriptMaskDrafts(session, taskStart.id));
+    applyTaskToolSet(pi, false);
+    refreshTaskStatus(ctx);
+    return { drafts, runContinuation: false };
+  }
+  if (aborted) return null;
+
+  // 1. FINISH: the active task produced a reply. Bookkeeping + restore +
+  // transcript masks land as drafts; the result travels as a trailing
+  // custom_message draft so the mainline consumes it in the continuation turn.
+  if (taskStart) {
+    if (!hasAssistantAfterTaskStart(session, taskStart.id)) {
+      ctx.ui.notify(
+        "Auto: the task agent has not produced a reply yet; leaving the task open.",
+        "warning",
+      );
+      return null;
+    }
+
+    const title = taskMarkerTitle(taskStart.data.title) || "untitled";
+    const lastAssistant = findLastEntry(session, isAssistantMessageEntry);
+    const lastAssistantContent = lastAssistant
+      ? taskResultTextContent(lastAssistant.message.content)
+      : undefined;
+    const resultText =
+      typeof lastAssistantContent === "string"
+        ? lastAssistantContent
+        : lastAssistantContent?.map((block) => block.text).join("\n");
+
+    const doneData: TaskDoneData = {
+      title,
+      ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+      branchLeafId: session.getLeafId() ?? "",
+      ...(resultText ? { content: resultText } : {}),
+      ...(taskStart.data.previousModel ? { previousModel: taskStart.data.previousModel } : {}),
+    };
+    const drafts: SessionBoundaryDraft[] = [
+      { type: "custom", customType: TASK_DONE_ENTRY_TYPE, data: doneData },
+    ];
+    if (taskStart.data.fork !== true && taskStart.data.restoreFromEntryId) {
+      drafts.push(restoreCompactionDraft(taskStart.data));
+    }
+    drafts.push(...collectTranscriptMaskDrafts(session, taskStart.id));
+
+    let runContinuation: boolean;
+    if (resultText) {
+      drafts.push({
+        type: "custom_message",
+        customType: "task-result",
+        content: `${taskResultMarker(title)}${resultText}`,
+        display: true,
+        details: { title },
+      });
+      runContinuation = true;
+    } else {
+      // No text report to deliver. Settling now is only honest when the
+      // queue is drained; with work still pending the run must stay alive so
+      // the next boundary can START the queue head. The continuation needs a
+      // user-role tail, so deliver an explicit empty-result notice — without
+      // it the last message would be the task-start delivery, which the
+      // mainline would read as an unanswered prompt and re-execute.
+      runContinuation = pendingTasks(session).length > 0 || pendingResume(session) !== null;
+      if (runContinuation) {
+        drafts.push({
+          type: "custom_message",
+          customType: "task-result",
+          content: `${taskResultMarker(title)}(The task finished without a text report.)`,
+          display: true,
+          details: { title },
+        });
+      }
+    }
+
+    await restorePreviousModel(pi, taskStart, ctx);
+    applyTaskToolSet(pi, false);
+    refreshTaskStatus(ctx);
+    return { drafts, runContinuation };
+  }
+
+  // 2. RESUME: checkpoint re-injection (no navigation exists here). Opens a
+  // new run epoch (task-start with resume:true) so the next boundary reads
+  // the run as finishable; the resumed state arrives as the checkpoint text
+  // recorded on the task-suspended (TUI) or task-done (flat) entry.
+  const resumeRequest = pendingResume(session);
+  if (resumeRequest) {
+    const suspended = resumeRequest.data.title
+      ? findSuspendedTaskByTitle(session, resumeRequest.data.title)
+      : latestSuspendedTask(session);
+    const doneCheckpoint = suspended
+      ? undefined
+      : latestTaskDoneCheckpoint(session, resumeRequest.data.title);
+    if (!suspended && !doneCheckpoint) {
+      ctx.ui.notify(
+        resumeRequest.data.title
+          ? `Resume request discarded: no resumable task titled "${resumeRequest.data.title}".`
+          : "Resume request discarded: no resumable task on this branch.",
+        "warning",
+      );
+      return {
+        drafts: [
+          {
+            type: "custom",
+            customType: TASK_RESUME_DONE_ENTRY_TYPE,
+            data: { resumeEntryId: resumeRequest.id },
+          },
+        ],
+        runContinuation: false,
+      };
+    }
+
+    const title = taskMarkerTitle(suspended?.data.title ?? doneCheckpoint?.title) || "untitled";
+    const checkpoint = suspended?.data.content ?? doneCheckpoint?.content;
+    const taskEntryId = suspended?.data.taskEntryId ?? doneCheckpoint?.taskEntryId;
+    const startData: TaskStartData = {
+      title,
+      returnTo: session.getLeafId() ?? "",
+      resume: true,
+      ...(taskEntryId ? { taskEntryId } : {}),
+    };
+    const drafts: SessionBoundaryDraft[] = [
+      { type: "custom", customType: TASK_START_ENTRY_TYPE, data: startData },
+      {
+        type: "custom",
+        customType: TASK_RESUME_DONE_ENTRY_TYPE,
+        data: { resumeEntryId: resumeRequest.id },
+      },
+      ...queueRequeueDrafts(session, new Set([resumeRequest.id])),
+    ];
+    const checkpointBlock = checkpoint ? `Checkpoint:\n${checkpoint}\n\n` : "";
+    drafts.push({
+      type: "custom_message",
+      customType: "task-resume-delivery",
+      content:
+        taskResumeMarker(title) +
+        // Flat resumes do not navigate: the previous branch is not in
+        // context, so the framing says the state arrives as an injected
+        // checkpoint (the last report), not as the full transcript.
+        "This task is running again in the current context: it is not a new task, and its previous state " +
+        "is injected below as a checkpoint (the last report it produced), not as the full transcript. " +
+        "The follow-up input after the checkpoint (review findings or a correction) applies to that state. " +
+        "Your final assistant message is the report to the mainline.\n\n" +
+        checkpointBlock +
+        resumeRequest.data.message,
+      display: true,
+    });
+    applyTaskToolSet(pi, true);
+    refreshTaskStatus(ctx);
+    return { drafts, runContinuation: true };
+  }
+
+  // 3. START: queue head runs inline as the continuation.
+  const activeTask = pendingTask(session);
+  if (!activeTask) return null;
+
+  const fork = activeTask.data.fork === true;
+  const startData: TaskStartData = {
+    title: taskTitle(activeTask.data.title),
+    returnTo: session.getLeafId() ?? "",
+    taskEntryId: activeTask.id,
+  };
+  if (fork) {
+    startData.fork = true;
+  }
+  const drafts: SessionBoundaryDraft[] = [];
+  if (!fork) {
+    // Capture the restore anchor before the mask hides everything: the
+    // active compaction's keep-zone start (its summary goes along so the
+    // restore can stand in for it), else the branch's first entry.
+    const branch = session.getBranch();
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i];
+      if (entry.type !== "compaction") continue;
+      startData.restoreFromEntryId = entry.firstKeptEntryId ?? entry.id;
+      if (entry.summary) startData.restoreSummary = entry.summary;
+      break;
+    }
+    startData.restoreFromEntryId ??= branch[0]?.id;
+  }
+  drafts.push({ type: "custom", customType: TASK_START_ENTRY_TYPE, data: startData });
+  if (!fork) {
+    // Self-retaining compaction: keeps nothing before it, so the task runs
+    // with a genuinely fresh context. FINISH's restore compaction supersedes
+    // it (only the newest compaction projects), which brings the mainline
+    // history back.
+    drafts.push({
+      type: "compaction",
+      // The only context head a flat fresh task sees (the mainline history
+      // before this point is hidden).
+      summary:
+        "Fresh task context: the mainline history before this point was intentionally hidden so this task starts fresh. Everything the task needs is in the delivered prompt below.",
+      firstKeptEntryId: null,
+    });
+  }
+  drafts.push(...queueRequeueDrafts(session, new Set([activeTask.id])));
+
+  const deliveredPrompt = await inlineRoleSkills(activeTask.data.prompt, activeTask.data.skills);
+  const label = taskMarkerTitle(activeTask.data.title) || "untitled";
+  const framing = fork ? TASK_START_FRAMING_FORK : TASK_START_FRAMING_FRESH;
+  drafts.push({
+    type: "custom_message",
+    customType: "task-start-delivery",
+    content: taskStartMarker(label) + framing + deliveredPrompt,
+    display: true,
+  });
+  applyTaskToolSet(pi, true);
+  refreshTaskStatus(ctx);
+  return { drafts, runContinuation: true };
+}
+
+/**
+ * Apply the mainline or task-branch tool set. syncTaskToolVisibility derives
+ * the variant from session state; the boundary drain calls this directly
+ * because its task-start/task-done entries are still uncommitted drafts while
+ * the handler runs (the drain's mode switch must not wait for them).
+ */
+function applyTaskToolSet(pi: ToolVisibilityAPI, inTaskBranch: boolean): void {
+  const active = pi.getActiveTools();
+  canonicalToolOrder ??= active;
+
+  const hidden = inTaskBranch ? MAINLINE_ONLY_TOOLS : TASK_BRANCH_ONLY_TOOLS;
+  const shown = inTaskBranch ? TASK_BRANCH_ONLY_TOOLS : MAINLINE_ONLY_TOOLS;
+
+  const desired = new Set(active.filter((name) => !hidden.includes(name)));
+  for (const name of shown) {
+    if (canonicalToolOrder.includes(name)) desired.add(name);
+  }
+
+  const next = canonicalToolOrder.filter((name) => desired.has(name));
+  for (const name of active) {
+    if (!canonicalToolOrder.includes(name) && desired.has(name)) next.push(name);
+  }
+
+  const unchanged = next.length === active.length && next.every((name, i) => name === active[i]);
+  if (!unchanged) {
+    pi.setActiveTools(next);
+  }
+}
+
+// ── Tool visibility sync ──────────────────────────────────────────
+
+/**
+ * Tool visibility is one-way now that task branches have no branch-only
+ * tools: inside a task branch the mainline-only tools are hidden, on the
+ * mainline everything canonical is shown. Kept as a named (empty) list so
+ * the sync below documents the invariant and a future branch-only tool has
+ * an obvious home.
+ */
+const TASK_BRANCH_ONLY_TOOLS: string[] = [];
+
+const MAINLINE_ONLY_TOOLS = ["push-task", "resume-task"];
+
+type ToolVisibilityAPI = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">;
+
+/** Restore compaction superseding the fresh-task mask at FINISH/ABORT-CLOSE. */
+function restoreCompactionDraft(data: TaskStartData): SessionBoundaryDraft {
+  return {
+    type: "compaction",
+    summary:
+      data.restoreSummary ??
+      "Mainline history restored after a fresh task. The task's working transcript is hidden via context edits; its bookkeeping entries and result follow.",
+    firstKeptEntryId: data.restoreFromEntryId ?? null,
+  };
+}
+
+/**
+ * context_edit drafts erasing the task's working transcript (assistant and
+ * toolResult messages) between its task-start entry and
+ * the branch tip. User messages are deliberately kept: the delivered prompt
+ * documents what the mainline dispatched, and client prompts injected
+ * mid-drain must survive. Shared by FINISH and ABORT-CLOSE.
+ */
+function collectTranscriptMaskDrafts(
+  session: ReadonlySessionLike,
+  taskStartEntryId: string,
+): SessionBoundaryDraft[] {
+  const branch = session.getBranch();
+  const startIndex = branch.findIndex((entry) => entry.id === taskStartEntryId);
+  if (startIndex === -1) return [];
+  const drafts: SessionBoundaryDraft[] = [];
+  // Hide the epoch's working transcript (assistant/toolResult turns). Kept:
+  // user messages and the custom_message deliveries/results — they project
+  // as user role and are the mainline-facing record of the epoch.
+  for (const entry of branch.slice(startIndex + 1)) {
+    if (entry.type !== "message") continue;
+    const role = entry.message.role;
+    if (role === "assistant" || role === "toolResult") {
+      drafts.push({ type: "context_edit", targetId: entry.id, replacement: null });
+    }
+  }
+  return drafts;
+}
+
+/**
+ * Drafts re-queueing every still-pending task/resume the task-start barrier
+ * would otherwise strand. In flat mode the task-start entry lands on the same
+ * branch as the queue, and the pendingTask/pendingResume scans treat a
+ * task-start as clearing everything below it — so survivors are re-appended
+ * above it, in their original branch order (new ids).
+ */
+function queueRequeueDrafts(
+  session: ReadonlySessionLike,
+  excludeIds: ReadonlySet<string>,
+): SessionBoundaryDraft[] {
+  const surviving = new Map<string, SessionBoundaryDraft>();
+  for (const task of pendingTasks(session)) {
+    if (excludeIds.has(task.id)) continue;
+    surviving.set(task.id, { type: "custom", customType: TASK_ENTRY_TYPE, data: task.data });
+  }
+  for (const resume of pendingResumes(session)) {
+    if (excludeIds.has(resume.id)) continue;
+    surviving.set(resume.id, {
+      type: "custom",
+      customType: TASK_RESUME_ENTRY_TYPE,
+      data: resume.data,
+    });
+  }
+  if (surviving.size === 0) return [];
+  const drafts: SessionBoundaryDraft[] = [];
+  for (const entry of session.getBranch()) {
+    const draft = surviving.get(entry.id);
+    if (draft) drafts.push(draft);
+  }
+  return drafts;
+}
+
+/** All unconsumed resume requests on this branch, enqueue order (oldest first). */
+function pendingResumes(session: ReadonlySessionLike): TaskResumeEntry[] {
+  const stack: TaskResumeEntry[] = [];
+
+  for (const entry of session.getBranch()) {
+    if (entry.type === "custom" && entry.customType === TASK_START_ENTRY_TYPE) {
+      // Inside a task branch the queue below it does not belong to the run.
+      stack.length = 0;
+      continue;
+    }
+    if (entry.type === "custom" && entry.customType === TASK_RESUME_DONE_ENTRY_TYPE) {
+      // A done with an id removes exactly the request it names; a legacy done
+      // without one consumes the newest request (the pre-FIFO LIFO rule).
+      const id = taskResumeDoneEntryId(entry);
+      if (id === undefined) {
+        stack.pop();
+        continue;
+      }
+      const index = stack.findIndex((request) => request.id === id);
+      if (index !== -1) stack.splice(index, 1);
+      continue;
+    }
+    if (isTaskResumeEntry(entry)) {
+      stack.push(entry);
+    }
+  }
+
+  return stack;
+}
+
+/** Latest task-done entry carrying a resume checkpoint (flat finishes record it there). */
+function latestTaskDoneCheckpoint(
+  session: ReadonlySessionLike,
+  title?: string,
+): TaskDoneData | undefined {
+  const branch = session.getBranch();
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type !== "custom" || entry.customType !== TASK_DONE_ENTRY_TYPE) continue;
+    const data: unknown = entry.data;
+    if (!isRecord(data)) continue;
+    if (typeof data.content !== "string") continue;
+    // Normalize both sides like findSuspendedTaskByTitle: stored titles went
+    // through taskMarkerTitle while the request title is raw.
+    if (
+      title !== undefined &&
+      taskMarkerTitle(typeof data.title === "string" ? data.title : undefined) !==
+        taskMarkerTitle(title)
+    ) {
+      continue;
+    }
+    return data as TaskDoneData;
+  }
+  return undefined;
+}
+
+/** Fields a task-done entry can carry (flat FINISH / ABORT-CLOSE write these). */
+interface TaskDoneData {
+  title?: string;
+  taskEntryId?: string;
+  branchLeafId?: string;
+  /** Checkpoint: the task's last assistant text, injected by flat resumes. */
+  content?: string;
+  previousModel?: { provider: string; modelId: string };
+  reason?: string;
+}
+
+/**
+ * Suspend the current task (TUI manual parking): navigate back to the
+ * mainline and record a resumable checkpoint. No question is relayed —
+ * task-ask is gone; a task states blockers in its final message instead.
+ * The pending task entry is consumed (original runs only) so /auto does not
+ * immediately restart the suspended task. `content` captures the last
+ * assistant text so a flat (non-TUI) resume can inject it as a checkpoint.
+ */
+async function suspendTask(
+  pi: TaskCommandAPI,
+  ctx: ExtensionCommandContext,
+  options: TaskActionOptions = {},
+): Promise<TaskActionResult> {
+  const taskStart = currentTask(ctx.sessionManager);
+  if (!taskStart) {
+    ctx.ui.notify("Not inside task, nothing to suspend.", "warning");
+    return;
+  }
+
+  const branchLeafId = ctx.sessionManager.getLeafId()!;
+  const title = taskMarkerTitle(taskStart.data.title);
+  const checkpoint = lastAssistantText(ctx.sessionManager);
+
+  const result = await ctx.navigateTree(taskStart.data.returnTo, {
+    summarize: false,
+  });
+  if (result.cancelled) return "cancelled";
+
+  syncTaskToolVisibility(pi, ctx.sessionManager);
+
+  if (shouldConsumeTaskEntry(ctx.sessionManager, taskStart)) {
+    pi.appendEntry(TASK_DONE_ENTRY_TYPE, {
+      ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+    });
+  }
+  pi.appendEntry(TASK_SUSPENDED_ENTRY_TYPE, {
+    title,
+    branchLeafId,
+    ...(checkpoint !== undefined ? { content: checkpoint } : {}),
+    ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+  });
+
+  ctx.ui.notify("Task suspended. Resume with `/resume-task` or `/auto`.", "info");
+
+  await restorePreviousModel(pi, taskStart, ctx);
+
+  refreshTaskStatus(ctx, { prefix: options.statusPrefix });
+}
+
+/**
  * Tool order captured at the first visibility sync. Pi rebuilds the system
  * prompt by concatenating promptGuidelines in the order of the array passed
- * to setActiveTools, so naive append would create a third system-prompt
+ * to setActiveTools, so naive append would create another system-prompt
  * variant and break prefix-cache reuse. Filtering subsets of this canonical
- * order keeps exactly two byte-stable prompts (mainline / task branch).
+ * order keeps every prompt variant byte-stable (mainline, task branch; flat
+ * continuations reuse the mainline prompt text with the branch tool set).
  */
 let canonicalToolOrder: string[] | undefined;
 
@@ -901,14 +1307,7 @@ const resumeTaskParameters = Type.Object({
     }),
   ),
   message: Type.String({
-    description:
-      "Message injected into the task branch on resume, e.g. review findings or the answer to its question.",
-  }),
-});
-
-const taskAskParameters = Type.Object({
-  question: Type.String({
-    description: "Question for the mainline orchestrator.",
+    description: "Message injected into the task branch on resume, e.g. review findings.",
   }),
 });
 
@@ -917,38 +1316,27 @@ let skillsExternallySet = false;
 let modelRegistry: ModelRegistry | undefined;
 
 /**
- * Arm (or upgrade) the per-session supervisor loop. Navigation is only
- * possible from a command context (navigateTree / waitForIdle exist on
+ * Arm the per-session supervisor loop. Navigation is only possible from a
+ * command context (navigateTree / waitForIdle exist on
  * ExtensionCommandContext, not on event or tool contexts), which is why the
- * arming command hands its context to the detached loop.
+ * arming command hands its context to the detached loop. There is exactly
+ * one policy (auto); in non-TUI modes the loop stays parked and the
+ * agent_before_settle boundary drains the queue instead (see
+ * handleTaskBoundary).
  */
-function armSupervisor(
-  pi: TaskCommandAPI,
-  ctx: ExtensionCommandContext,
-  mode: SupervisorMode,
-): "armed" | "upgraded" | "already-auto" | "already-supervised" {
+function armSupervisor(pi: TaskCommandAPI, ctx: ExtensionCommandContext): "armed" | "already-auto" {
   const state = getSupervisorState(ctx.sessionManager);
 
   if (state.stop) {
     // The loop is still alive (`stop` is cleared by its `finally`). Remember
     // the request so that a loop which is stopping right now re-arms instead
-    // of swallowing it (the `/auto-stop` → `/start-task` window). A latch
-    // left behind by a healthy loop is dropped by the next `stop()` and is
-    // never honored by a loop that stopped itself.
-    state.reArm = mode;
-
-    if (mode === "relay") return "already-supervised";
-    if (state.mode === "auto") return "already-auto";
-
-    // A parked relay loop waits on its wake promise; switch the policy and
-    // wake it so it re-evaluates (it re-reads state.mode every iteration).
-    state.mode = "auto";
-    state.wake?.();
-    refreshTaskStatus(ctx, { prefix: AUTO_STATUS_PREFIX });
-    return "upgraded";
+    // of swallowing it (the `/auto-stop` → `/auto` window). A latch left
+    // behind by a healthy loop is dropped by the next `stop()` and is never
+    // honored by a loop that stopped itself.
+    state.reArm = true;
+    return "already-auto";
   }
 
-  state.mode = mode;
   // Detach: the command returns immediately and the loop supervises task
   // work in the background until /auto-stop (or an interrupt) stops it.
   void runSupervisorLoop(pi, ctx, state).catch((error: unknown) => {
@@ -980,7 +1368,7 @@ async function runSupervisorLoop(
   state.stop = () => {
     // A latch belongs to this stop only: drop any older one, so a stop can
     // never be undone by a stale re-arm request.
-    state.reArm = undefined;
+    state.reArm = false;
     stoppedByRequest = true;
     stopped = true;
     state.wake?.();
@@ -996,67 +1384,50 @@ async function runSupervisorLoop(
       // though the session was shut down.
       if (stopped) break;
 
-      // Re-read the policy per iteration: /auto can upgrade a parked relay
-      // supervisor, which changes what this loop is allowed to do.
-      const auto = state.mode === "auto";
-      // The "[auto] " prefix marks the /auto switch, so a relay supervisor
-      // passes none (refreshTaskStatus keeps it sticky while auto runs).
-      const statusPrefix = auto ? AUTO_STATUS_PREFIX : undefined;
+      const statusPrefix = AUTO_STATUS_PREFIX;
 
-      if (auto && lastAssistantWasAborted(ctx.sessionManager)) break;
+      if (lastAssistantWasAborted(ctx.sessionManager)) break;
 
-      // Starting queued tasks is /auto's job; a relay supervisor never
-      // touches the queue.
-      if (auto && pendingTask(ctx.sessionManager)) {
-        const result = await startTask(pi, ctx, {
-          statusPrefix,
-          waitForAgentStart: (taskStartId) => waitForAgentStart(state, taskStartId),
-        });
-        // "error" is a refused/failed start that was already reported to the
-        // user; only a cancelled navigation or a launch timeout ends
-        // supervision.
-        if (result !== "started" && result !== "error") break;
-        continue;
-      }
-
-      if (pendingResume(ctx.sessionManager)) {
-        const result = await resumeTask(pi, ctx, {
-          statusPrefix,
-          waitForAgentStart: (taskStartId) => waitForAgentStart(state, taskStartId),
-        });
-        // A discarded resume request ("error") is consumed with a visible
-        // warning — keep the loop alive so queued tasks still run. Only a
-        // cancelled navigation ends supervision; a launch timeout ends auto
-        // mode but merely parks a relay supervisor, which is still armed to
-        // relay the next question.
-        if (result === "cancelled") break;
-        if (result === "launch-timeout" && auto) break;
-        continue;
-      }
-
-      const activeTask = currentTask(ctx.sessionManager);
-      if (activeTask) {
-        const hasReply = hasAssistantAfterTaskStart(ctx.sessionManager, activeTask.id);
-        if (!hasReply && auto) {
-          // Never auto-finalize before the task branch has produced a reply.
-          ctx.ui.notify(
-            "Auto stopped: the task agent has not produced a reply yet. Re-run /auto to resume supervision.",
-            "warning",
-          );
-          break;
-        }
-
-        // A pending task-ask is relayed by suspending first, so the mainline
-        // answers it instead of the task being finalized.
-        if (hasReply && pendingAsk(ctx.sessionManager, activeTask.id)) {
-          const result = await suspendTask(pi, ctx, { statusPrefix });
-          if (result === "cancelled") break;
+      // Outside the TUI the agent_before_settle boundary drains the queue
+      // inside the current run (no navigation exists there); this loop only
+      // keeps the supervisor state alive so the boundary gate can see it.
+      if (ctx.mode === "tui") {
+        if (pendingTask(ctx.sessionManager)) {
+          const result = await startTask(pi, ctx, {
+            statusPrefix,
+            waitForAgentStart: (taskStartId) => waitForAgentStart(state, taskStartId),
+          });
+          // "error" is a refused/failed start that was already reported to the
+          // user; only a cancelled navigation or a launch timeout ends
+          // supervision.
+          if (result !== "started" && result !== "error") break;
           continue;
         }
 
-        // Finishing a run is /auto's job; a relay supervisor leaves that
-        // decision to the user (/finish-task, /abort-task) and parks instead.
-        if (hasReply && auto) {
+        if (pendingResume(ctx.sessionManager)) {
+          const result = await resumeTask(pi, ctx, {
+            statusPrefix,
+            waitForAgentStart: (taskStartId) => waitForAgentStart(state, taskStartId),
+          });
+          // A discarded resume request ("error") is consumed with a visible
+          // warning — keep the loop alive so queued tasks still run. A
+          // cancelled navigation or a launch timeout ends supervision.
+          if (result === "cancelled" || result === "launch-timeout") break;
+          continue;
+        }
+
+        const activeTask = currentTask(ctx.sessionManager);
+        if (activeTask) {
+          const hasReply = hasAssistantAfterTaskStart(ctx.sessionManager, activeTask.id);
+          if (!hasReply) {
+            // Never auto-finalize before the task branch has produced a reply.
+            ctx.ui.notify(
+              "Auto stopped: the task agent has not produced a reply yet. Re-run /auto to resume supervision.",
+              "warning",
+            );
+            break;
+          }
+
           const result = await finishTask(pi, ctx, { statusPrefix });
           if (result === "cancelled") break;
           continue;
@@ -1101,8 +1472,8 @@ async function runSupervisorLoop(
     // timeout, cancelled navigation) must not resurrect supervision from a
     // latch some earlier arm request left behind.
     const reArm = state.reArm;
-    state.reArm = undefined;
-    if (reArm && stoppedByRequest) armSupervisor(pi, ctx, reArm);
+    state.reArm = false;
+    if (reArm && stoppedByRequest) armSupervisor(pi, ctx);
   }
 }
 
@@ -1271,6 +1642,7 @@ async function finishTask(
     ? taskResultTextContent(lastAssistant.message.content)
     : undefined;
   const lastAssistantId = lastAssistant?.id;
+  const checkpoint = lastAssistantText(ctx.sessionManager);
 
   const title = taskMarkerTitle(taskStart.data.title);
   // Record the task-branch leaf so /resume-task can navigate back here.
@@ -1317,7 +1689,7 @@ async function finishTask(
   pi.appendEntry(TASK_SUSPENDED_ENTRY_TYPE, {
     title,
     branchLeafId,
-    reason: "finish",
+    ...(checkpoint !== undefined ? { content: checkpoint } : {}),
     ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
   });
 
@@ -1463,76 +1835,13 @@ async function resumeTask(
 
   if (agentStarted && !(await agentStarted)) {
     ctx.ui.notify(
-      `Supervisor: no agent_start for the resumed task was observed within ${AUTO_AGENT_START_TIMEOUT_MS / 1000} seconds (timeout or session shutdown). The resume message was already delivered and may still run - auto mode stops here, a relay stays armed; check the branch before restarting supervision.`,
+      `Supervisor: no agent_start for the resumed task was observed within ${AUTO_AGENT_START_TIMEOUT_MS / 1000} seconds (timeout or session shutdown). The resume message was already delivered and may still run - auto mode stops here; check the branch before restarting supervision.`,
       "error",
     );
     return "launch-timeout";
   }
 
   return "started";
-}
-
-/**
- * Suspend the current task: return to the mainline and record a resumable
- * point. With a pending task-ask (no user/assistant message after the ask
- * entry), the question is relayed to the mainline as a `[task-question: …]`
- * message. The pending task entry is consumed (original runs only) so /auto
- * does not immediately restart the suspended task.
- */
-async function suspendTask(
-  pi: TaskCommandAPI,
-  ctx: ExtensionCommandContext,
-  options: TaskActionOptions = {},
-): Promise<TaskActionResult> {
-  const taskStart = currentTask(ctx.sessionManager);
-  if (!taskStart) {
-    ctx.ui.notify("Not inside task, nothing to suspend.", "warning");
-    return;
-  }
-
-  const ask = pendingAsk(ctx.sessionManager, taskStart.id);
-  const branchLeafId = ctx.sessionManager.getLeafId()!;
-  const title = taskMarkerTitle(taskStart.data.title);
-
-  const result = await ctx.navigateTree(taskStart.data.returnTo, {
-    summarize: false,
-  });
-  if (result.cancelled) return "cancelled";
-
-  syncTaskToolVisibility(pi, ctx.sessionManager);
-
-  if (shouldConsumeTaskEntry(ctx.sessionManager, taskStart)) {
-    pi.appendEntry(TASK_DONE_ENTRY_TYPE, {
-      ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
-    });
-  }
-  pi.appendEntry(TASK_SUSPENDED_ENTRY_TYPE, {
-    title,
-    branchLeafId,
-    reason: ask ? "ask" : "manual",
-    ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
-  });
-
-  if (ask) {
-    // customType is dropped in model context, so the content carries an
-    // explicit marker; the trailing instruction tells the mainline AI how to
-    // relay (answer + resume-task) without any external protocol.
-    pi.sendMessage(
-      {
-        customType: "task-question",
-        content: `${taskQuestionMarker(title)}${ask.data.question}\n\n${taskQuestionInstructions}`,
-        display: true,
-        details: { title, question: ask.data.question },
-      },
-      { triggerTurn: true },
-    );
-  } else {
-    ctx.ui.notify("Task suspended. Resume with `/resume-task` or `/auto`.", "info");
-  }
-
-  await restorePreviousModel(pi, taskStart, ctx);
-
-  refreshTaskStatus(ctx, { prefix: options.statusPrefix });
 }
 
 /**
@@ -1546,7 +1855,7 @@ type TaskActionResult = "started" | "cancelled" | "launch-timeout" | "error" | v
 async function restorePreviousModel(
   pi: TaskCommandAPI,
   taskStart: TaskStartEntry,
-  ctx: ExtensionCommandContext,
+  ctx: Pick<ExtensionContext, "modelRegistry" | "ui">,
 ): Promise<void> {
   if (!taskStart.data.previousModel) return;
 
@@ -1576,6 +1885,18 @@ function isAssistantMessageEntry(
   entry: SessionEntry,
 ): entry is SessionMessageEntry & { message: { role: "assistant" } } {
   return entry.type === "message" && entry.message.role === "assistant";
+}
+
+/**
+ * Text of the last assistant message on the branch (thinking/tool blocks
+ * dropped), or undefined when there is none (or it has no text). Used as the
+ * resumable checkpoint recorded on task-suspended / task-done entries.
+ */
+function lastAssistantText(session: ReadonlySessionLike): string | undefined {
+  const last = findLastEntry(session, isAssistantMessageEntry);
+  if (!last) return undefined;
+  const text = renderTextContent(last.message.content).trim();
+  return text === "" ? undefined : text;
 }
 
 /**
@@ -1756,39 +2077,42 @@ function findSuspendedTaskByTitle(
 }
 
 /**
- * The last task-ask entry after `taskStartId` that no user/assistant message
- * has superseded. Tool results do not consume an ask: the task-ask tool
- * terminates the turn, so its own tool result trails the entry without
- * answering it. A user message (direct answer or resume payload) or a new
- * assistant turn consumes it.
+ * The open task run on this branch, or null.
+ *
+ * The latest task-start is open unless a later task-done closes it. A done
+ * closes the run when it names the same queued task entry
+ * (`taskEntryId`, id-based accounting), or when it carries no id at all
+ * (legacy pre-FIFO entries consumed "the nearest" task, which includes the
+ * run itself). A done naming a *different* task entry — e.g. /discard-task
+ * discarding a queued task while a run is open (flat mode keeps start and
+ * done on one branch) — must not close the run.
+ *
+ * Tree-mode equivalence: the mainline path never contains a task-start, and
+ * a task branch's start is never followed by its done (finish/abort append
+ * bookkeeping after navigating back), so every consumer (tool visibility,
+ * branch prompt section, supervisor, /finish-task, /abort-task) sees exactly
+ * the pre-flat behavior there.
  */
-function pendingAsk(session: ReadonlySessionLike, taskStartId: string): TaskAskEntry | null {
-  let afterTaskStart = false;
-  let candidate: TaskAskEntry | null = null;
-
-  for (const entry of session.getBranch()) {
-    if (entry.id === taskStartId) {
-      afterTaskStart = true;
-      continue;
-    }
-    if (!afterTaskStart) continue;
-    if (
-      entry.type === "message" &&
-      (entry.message.role === "user" || entry.message.role === "assistant")
-    ) {
-      candidate = null;
-      continue;
-    }
-    if (isTaskAskEntry(entry)) {
-      candidate = entry;
-    }
-  }
-
-  return candidate;
-}
-
 function currentTask(session: ReadonlySessionLike): TaskStartEntry | null {
-  return findLastEntry(session, isTaskStartEntry) ?? null;
+  const branch = session.getBranch();
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (!isTaskStartEntry(entry)) continue;
+    const taskEntryId = entry.data.taskEntryId;
+    for (let j = i + 1; j < branch.length; j++) {
+      const doneId = taskDoneEntryId(branch[j]);
+      // taskDoneEntryId yields undefined both for non-done entries and for
+      // legacy id-less dones; only the latter may close the run.
+      if (doneId !== undefined) {
+        if (doneId === taskEntryId) return null;
+        continue;
+      }
+      const later = branch[j];
+      if (later.type === "custom" && later.customType === TASK_DONE_ENTRY_TYPE) return null;
+    }
+    return entry;
+  }
+  return null;
 }
 
 function findLastEntry<T extends SessionEntry>(
@@ -1850,7 +2174,9 @@ function isTaskStartData(value: unknown): value is TaskStartData {
     (value.title !== undefined && typeof value.title !== "string") ||
     (value.fork !== undefined && typeof value.fork !== "boolean") ||
     (value.resume !== undefined && typeof value.resume !== "boolean") ||
-    (value.taskEntryId !== undefined && typeof value.taskEntryId !== "string")
+    (value.taskEntryId !== undefined && typeof value.taskEntryId !== "string") ||
+    (value.restoreFromEntryId !== undefined && typeof value.restoreFromEntryId !== "string") ||
+    (value.restoreSummary !== undefined && typeof value.restoreSummary !== "string")
   ) {
     return false;
   }
@@ -1872,6 +2198,13 @@ interface TaskStartData {
   resume?: boolean;
   /** Id of the queued `task` entry this run consumes on finish/suspend. */
   taskEntryId?: string;
+  /**
+   * Flat fresh starts only: anchor for the post-finish restore compaction
+   * (the pre-task keep-zone start), captured at START before the mask.
+   */
+  restoreFromEntryId?: string;
+  /** Flat fresh starts only: summary the restore compaction carries. */
+  restoreSummary?: string;
 }
 
 function isTaskSuspendedEntry(entry: SessionEntry): entry is TaskSuspendedEntry {
@@ -1887,6 +2220,7 @@ function isTaskSuspendedData(value: unknown): value is TaskSuspendedData {
     isRecord(value) &&
     typeof value.branchLeafId === "string" &&
     (value.title === undefined || typeof value.title === "string") &&
+    (value.content === undefined || typeof value.content === "string") &&
     (value.reason === undefined || typeof value.reason === "string") &&
     (value.taskEntryId === undefined || typeof value.taskEntryId === "string")
   );
@@ -1895,7 +2229,10 @@ function isTaskSuspendedData(value: unknown): value is TaskSuspendedData {
 interface TaskSuspendedData {
   title?: string;
   branchLeafId: string;
-  reason?: "finish" | "abort" | "ask" | "manual";
+  /** Checkpoint: the task's last assistant text, injected by flat resumes. */
+  content?: string;
+  /** Legacy field (pre-checkpoint entries); read-compatible only. */
+  reason?: string;
   /** Propagated from the task-start so resumed runs keep entry accounting. */
   taskEntryId?: string;
 }
@@ -1921,14 +2258,6 @@ interface TaskResumeData {
   message: string;
 }
 
-function isTaskAskEntry(entry: SessionEntry): entry is TaskAskEntry {
-  return isCustomEntry(entry, TASK_ASK_ENTRY_TYPE, isTaskAskData);
-}
-
-type TaskAskEntry = CustomEntry<typeof TASK_ASK_ENTRY_TYPE, TaskAskData>;
-
-const TASK_ASK_ENTRY_TYPE = "task-ask";
-
 function isCustomEntry<TCustomType extends string, TData>(
   entry: SessionEntry,
   customType: TCustomType,
@@ -1943,22 +2272,15 @@ type CustomEntry<TCustomType extends string, TData> = SessionEntry & {
   data: TData;
 };
 
-function isTaskAskData(value: unknown): value is TaskAskData {
-  return isRecord(value) && typeof value.question === "string";
-}
-
-interface TaskAskData {
-  question: string;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
 /**
  * Single-line, marker-safe variant of taskTitle for embedding into
- * `[task-result: …]` / `[task-question: …]` prefixes: a multi-line title
- * would break the marker and its stripping in renderers and test helpers.
+ * `[task-result: …]` / `[task-start: …]` / `[task-resume: …]` prefixes: a
+ * multi-line title would break the marker and its stripping in renderers and
+ * test helpers.
  */
 function taskMarkerTitle(title?: string): string {
   // Strip "]" as well: it would terminate the marker early and break
@@ -2259,8 +2581,7 @@ function getSupervisorState(sessionManager: object): TaskSupervisorState {
   if (!state) {
     state = {
       stop: undefined,
-      mode: "auto",
-      reArm: undefined,
+      reArm: false,
       parked: false,
       parkedWaiters: [],
       wake: undefined,
@@ -2279,8 +2600,6 @@ function getSupervisorState(sessionManager: object): TaskSupervisorState {
 interface TaskSupervisorState {
   /** Set while a supervisor loop is armed for this session. */
   stop: (() => void) | undefined;
-  /** Effective policy; /auto upgrades a running relay supervisor. */
-  mode: SupervisorMode;
   /**
    * Arm request latched while the loop is stopping (its `finally` re-arms
    * with it): `/auto-stop` clears `stop` only after the current iteration,
@@ -2288,7 +2607,7 @@ interface TaskSupervisorState {
    * only when the stop was requested, and `stop()` drops any older latch, so
    * it can never outlive the stop it belongs to.
    */
-  reArm: SupervisorMode | undefined;
+  reArm: boolean;
   /** True while the loop is parked waiting for the next agent_end wake. */
   parked: boolean;
   /** Waiters resolved on each park transition (see whenAutoParked). */
@@ -2310,13 +2629,6 @@ type AgentStartWaiter = {
   resolve: (started: boolean) => void;
   timeout: ReturnType<typeof setTimeout>;
 };
-
-/**
- * Which work the armed loop owns. `auto` is the /auto switch (start queued
- * tasks, relay questions, finish runs); `relay` only moves questions to the
- * mainline and carries the answer back into the branch.
- */
-type SupervisorMode = "auto" | "relay";
 
 function flushParkedWaiters(sessionManager: object): void {
   const state = supervisorStates.get(sessionManager);

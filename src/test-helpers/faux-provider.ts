@@ -74,6 +74,15 @@ export class FauxProvider {
     return this.recordedPrompts[this.recordedPrompts.length - 1];
   }
 
+  /**
+   * All recorded LLM request messages, oldest first (capped at
+   * MAX_RECORDED_PROMPTS). Boundary-drain tests assert masking/fresh-context
+   * behavior against specific earlier requests, not just the latest one.
+   */
+  get promptHistory(): readonly PromptMessage[][] {
+    return this.recordedPrompts;
+  }
+
   stream(model: Model<string>, context: TranscriptContext, options?: SimpleStreamOptions) {
     this.recordedPrompts.push(
       context.messages.map((message) => ({
@@ -188,12 +197,6 @@ function makeAssistantMessage(responses: MockLLMDescriptor[]): AssistantMessage 
             ...(descriptor.title ? { title: descriptor.title } : {}),
             message: descriptor.message,
           },
-          { id: `call-${index + 1}` },
-        );
-      case "response:task-ask":
-        return piAi.fauxToolCall(
-          "task-ask",
-          { question: descriptor.question },
           { id: `call-${index + 1}` },
         );
     }

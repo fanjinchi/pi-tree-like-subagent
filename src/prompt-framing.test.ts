@@ -24,8 +24,10 @@ describe("task delivery framing", () => {
         lastUserText(h),
         "[task-start: implement]\n\n" +
           "This task is running now: the push-task call above only queued it and it has since been started. " +
+          "Never say or imply the task is still queued, waiting to be started, or needs /start-task, /auto, or any user action. " +
           "The conversation above is the mainline context that produced the task - use it as background, do not redo it. " +
-          "Execute the task below; your final message is the report to the mainline.\n\n" +
+          "Mode blocks (plan mode, ACP) and their rules still apply. " +
+          "Execute the task below; your final assistant message is the report to the mainline.\n\n" +
           "Implement plan X as discussed.",
       );
     } finally {
@@ -46,7 +48,9 @@ describe("task delivery framing", () => {
         lastUserText(h),
         "[task-start: AAA]\n\n" +
           "This task is running now: it was queued on the mainline and started here from a fresh context. " +
-          "Do not wait for or request a start. Execute the task below; your final message is the report to the mainline.\n\n" +
+          "Never say or imply the task is still queued, waiting to be started, or needs /start-task, /auto, or any user action. " +
+          "Mode blocks (plan mode, ACP) and their rules still apply. " +
+          "Execute the task below; your final assistant message is the report to the mainline.\n\n" +
           "some prompt",
       );
     } finally {
@@ -67,7 +71,9 @@ describe("task delivery framing", () => {
         lastUserText(h),
         "[task-start: untitled]\n\n" +
           "This task is running now: it was queued on the mainline and started here from a fresh context. " +
-          "Do not wait for or request a start. Execute the task below; your final message is the report to the mainline.\n\n" +
+          "Never say or imply the task is still queued, waiting to be started, or needs /start-task, /auto, or any user action. " +
+          "Mode blocks (plan mode, ACP) and their rules still apply. " +
+          "Execute the task below; your final assistant message is the report to the mainline.\n\n" +
           "deliver me",
       );
     } finally {
@@ -92,8 +98,8 @@ describe("task delivery framing", () => {
         lastUserText(h),
         "[task-resume: AAA]\n\n" +
           "This task is running again: the mainline started it here and sent the input below as follow-up " +
-          "(review findings, an answer, or a correction). Continue the same task - this is new input, not a new task. " +
-          "Your final message is the report to the mainline.\n\n" +
+          "(review findings or a correction). Continue the same task - this is new input, not a new task. " +
+          "Your final assistant message is the report to the mainline.\n\n" +
           'You are resuming the task "AAA". Continue from where you left off.',
       );
     } finally {
@@ -118,8 +124,8 @@ describe("task delivery framing", () => {
         lastUserText(h),
         "[task-resume: AAA]\n\n" +
           "This task is running again: the mainline started it here and sent the input below as follow-up " +
-          "(review findings, an answer, or a correction). Continue the same task - this is new input, not a new task. " +
-          "Your final message is the report to the mainline.\n\n" +
+          "(review findings or a correction). Continue the same task - this is new input, not a new task. " +
+          "Your final assistant message is the report to the mainline.\n\n" +
           "Fix the edge case.",
       );
     } finally {
@@ -182,7 +188,13 @@ describe("task-branch system prompt", () => {
           .endsWith(mainlinePrompt.slice(mainlinePrompt.indexOf("</rules>"))),
         "tail after rules unchanged (modulo the dropped section separator)",
       );
-      assert.ok(branchBase.includes("- task-ask: Ask the mainline orchestrator"));
+      // The branch tool set is the mainline set minus push-task/resume-task.
+      assert.ok(mainlinePrompt.includes("- push-task: Hand off work to an isolated task branch"));
+      assert.ok(
+        mainlinePrompt.includes("- resume-task: Queue a resume of a suspended task branch"),
+      );
+      assert.ok(!branchBase.includes("- push-task:"), "branch hides push-task");
+      assert.ok(!branchBase.includes("- resume-task:"), "branch hides resume-task");
       assert.ok(!branchBase.includes("push-task is the default way to handle"));
       // Task titles only ever travel in the branch-tip delivery message.
       assert.ok(!branchPrompt.includes("AAA"), "title must not leak into the system prompt");

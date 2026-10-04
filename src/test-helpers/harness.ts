@@ -5,6 +5,7 @@ import {
   getSystemMessageText,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
+
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -14,6 +15,9 @@ import {
   SessionManager,
   SettingsManager,
   type AgentSession,
+  type AgentSessionEvent,
+  type ExtensionContext,
+  type ExtensionError,
   type InputSource,
   type SessionEntry,
   type SessionStartEvent,
@@ -21,13 +25,21 @@ import {
 
 // eslint-disable-next-line unslop/import-control -- extension factory not available via src test-helpers import chain
 import registerSuperGsd from "../../index.js";
+
 import { isDeepStrictEqual } from "node:util";
+
 import { extractTextContent } from "../text-content.js";
+
 import { type SessionEntry as TestSessionEntry, TestSession } from "./test-session.js";
+
 import { whenAutoParked } from "../index.js";
+
 import { TestUi } from "./test-ui.js";
+
 import { FAUX_MODEL, FAUX_PROVIDER, FauxProvider, type PromptMessage } from "./faux-provider.js";
+
 import { MockLLM } from "./mock-llm.js";
+
 import { MockUser, type MockUserAction } from "./mock-user.js";
 
 export interface TestHarnessOptions {
@@ -39,6 +51,13 @@ export interface TestHarnessOptions {
    * a production launch's first frame and exercise default-on auto.
    */
   sessionStartEvent?: SessionStartEvent;
+  /**
+   * Extension mode reported on every extension context (`ctx.mode`).
+   * Defaults to "tui": the boundary drain only engages outside TUI mode, so
+   * pre-existing tests keep the tree/navigation semantics they were written
+   * against. Pass "rpc" to exercise the in-run boundary drain.
+   */
+  mode?: ExtensionMode;
 }
 
 export class TestHarness {
@@ -52,6 +71,15 @@ export class TestHarness {
     private readonly fauxProvider: FauxProvider,
     private handledSessionEntryIds = new Set<string>(),
   ) {}
+
+  readonly extensionErrors: ExtensionError[] = [];
+
+  /** Number of public `agent_settled` events observed this session. */
+  private settled = 0;
+
+  private readonly onSessionEvent = (event: AgentSessionEvent): void => {
+    if (event.type === "agent_settled") this.settled += 1;
+  };
 
   get modelRegistry(): ModelRegistry {
     // ModelRegistry is a thin synchronous facade over the session's runtime.
@@ -148,12 +176,50 @@ export class TestHarness {
 
     await session.bindExtensions({
       uiContext: harness.testUi.context,
+      mode: options.mode ?? "tui",
       commandContextActions: harness.commandContextActions(),
+      onError: (error: ExtensionError) => {
+        harness.extensionErrors.push(error);
+      },
       shutdownHandler: () => {
         // No-op: we don't want extension shutdown to terminate the process.
       },
     });
+    session.subscribe(harness.onSessionEvent);
     return harness;
+  }
+
+  assertExtensionError(text: string): void {
+    const last = this.extensionErrors[this.extensionErrors.length - 1];
+    assert.ok(last, `expected an extension error containing ${JSON.stringify(text)}, got none`);
+    assert.ok(
+      last.error.includes(text),
+      `expected extension error to contain ${JSON.stringify(text)}, got ${JSON.stringify(last.error)}`,
+    );
+  }
+
+  settledCount(): number {
+    return this.settled;
+  }
+
+  async promptFollowUp(text: string): Promise<void> {
+    // session.prompt evaluates isStreaming at call time; racing the run's
+    // startup would take the non-streaming path and collide with the active
+    // run. Wait for agent_start first (no-op when already streaming).
+    if (!this.session.isStreaming) {
+      await new Promise<void>((resolve) => {
+        const unsubscribe = this.session.subscribe((event) => {
+          if (event.type === "agent_start") {
+            unsubscribe();
+            resolve();
+          }
+        });
+      });
+    }
+    await this.session.prompt(text, {
+      streamingBehavior: "followUp",
+      source: "test" as InputSource,
+    });
   }
 
   dispose(): void {
@@ -165,12 +231,10 @@ export class TestHarness {
     assert.strictEqual(this.testUi.lastStatus, expected);
   }
 
-  /** Task-branch widget lines (normalized), or undefined when cleared. */
   assertWidget(expected?: string[]): void {
     assert.deepStrictEqual(this.testUi.lastWidget, expected);
   }
 
-  /** Raw status value before ANSI stripping — asserts that styling was applied. */
   get lastStatusRaw(): string | undefined {
     return this.testUi.lastStatusRaw;
   }
@@ -190,17 +254,10 @@ export class TestHarness {
     assert.deepStrictEqual(this.testSession.entries(), expected);
   }
 
-  /** Inject a raw custom entry (for testing legacy/edge-case session shapes). */
   appendCustomEntry(customType: string, data: unknown): void {
     this.sessionManager.appendCustomEntry(customType, data);
   }
 
-  /**
-   * Inject a Pi-produced aborted assistant turn (empty text, stopReason
-   * "aborted"), as if the user pressed Esc mid-turn. Leaves the session leaf
-   * at the injected entry. Used to reproduce interrupted turns that the
-   * canonical flow cannot produce deterministically.
-   */
   appendAbortedAssistantTurn(): void {
     this.sessionManager.appendMessage({
       role: "assistant",
@@ -221,12 +278,12 @@ export class TestHarness {
     });
   }
 
-  /**
-   * Role/text/stopReason of the messages the most recent LLM stream received.
-   * Undefined if no stream has happened yet.
-   */
   lastPromptMessages(): PromptMessage[] | undefined {
     return this.fauxProvider.lastPromptMessages;
+  }
+
+  promptHistory(): readonly PromptMessage[][] {
+    return this.fauxProvider.promptHistory;
   }
 
   assertSessionContains(...expected: TestSessionEntry[]): void {
@@ -243,10 +300,6 @@ export class TestHarness {
     await this.scanAndReactLoop();
   }
 
-  /**
-   * Wait until the background /auto loop has drained all pending work and
-   * parked (or stopped). Resolves immediately when no loop is running.
-   */
   async waitForAutoParked(): Promise<void> {
     await whenAutoParked(this.sessionManager);
   }
@@ -258,35 +311,24 @@ export class TestHarness {
       .sort();
   }
 
-  /** Names of the currently active tools (what the LLM can call). */
   activeToolNames(): string[] {
     return this.session.getActiveToolNames().slice().sort();
   }
 
-  /** The current effective system prompt (for byte-stability assertions).
-   *
-   * 0.87.1 keeps the prompt as structured sections and patches them via
-   * mid-conversation system messages (never a literal trailing append), so the
-   * text a run actually sees is the replayed merge of every system message in
-   * the transcript — render exactly that.
-   */
   systemPromptText(): string {
     const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
     return current ? getSystemMessageText(current) : "";
   }
 
-  /** Force the active tool set (bypasses branch visibility sync in tests). */
   setActiveToolNames(names: string[]): void {
     this.session.setActiveToolsByName(names);
   }
 
-  /** Count custom entries of the given type on the current branch. */
   countBranchCustomEntries(customType: string): number {
     return this.sessionManager.getBranch().filter((entry) => isCustomType(entry, customType))
       .length;
   }
 
-  /** Entry ids of the custom entries of the given type on the current branch. */
   branchCustomEntryIds(customType: string): string[] {
     return this.sessionManager
       .getBranch()
@@ -294,13 +336,11 @@ export class TestHarness {
       .map((entry) => entry.id);
   }
 
-  /** Count custom entries of the given type across the whole session tree. */
   countAllCustomEntries(customType: string): number {
     return this.sessionManager.getEntries().filter((entry) => isCustomType(entry, customType))
       .length;
   }
 
-  /** Data payloads of the custom entries of the given type on the current branch. */
   branchCustomData(customType: string): unknown[] {
     return this.sessionManager
       .getBranch()
@@ -419,6 +459,9 @@ export class TestHarness {
     }
   }
 }
+
+/** `ExtensionMode` is not re-exported from the package root (pi 0.87.1); extract it. */
+type ExtensionMode = ExtensionContext["mode"];
 
 function isTaskEntryData(entry: SessionEntry): entry is SessionEntry & {
   type: "custom";

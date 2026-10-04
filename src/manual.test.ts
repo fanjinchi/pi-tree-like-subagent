@@ -140,6 +140,20 @@ describe("manual workflow", () => {
               );
               h.assertStatus("suspended: AAA");
             }),
+            node("abort AAA keeps the branch checkpoint", async (h) => {
+              await h.prompt("/abort-task");
+              // The parent chain aborted once already; the new entry is last.
+              const suspended = h.branchCustomData("task-suspended") as Array<{
+                content?: string;
+              }>;
+              assert.strictEqual(
+                suspended.at(-1)?.content,
+                "Done.",
+                "the checkpoint is the task branch's last assistant text, not the mainline's",
+              );
+              h.assertStatus("pending task: AAA");
+              h.assertLastNotification("Task aborted. Branch abandoned without summary.");
+            }),
           ),
         ),
       ),

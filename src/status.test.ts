@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 
-import { assistant, pushTask, responds, taskAsk, user, TestHarness } from "./test-helpers/index.js";
+import { assistant, pushTask, responds, user, TestHarness } from "./test-helpers/index.js";
 import { TASK_START_FRAMING_FRESH, taskStartMarker } from "./index.js";
 
 describe("task status bar", () => {
@@ -36,32 +36,6 @@ describe("task status bar", () => {
 
       // The finished task stays resumable; the status reflects it.
       await h.prompt("/resume-task");
-      h.assertStatus("current task: AAA");
-
-      await h.prompt("/finish-task");
-      h.assertStatus("suspended: AAA");
-    } finally {
-      h.dispose();
-    }
-  });
-
-  it("shows awaiting answer while a task question is suspended", async () => {
-    const h = await TestHarness.create();
-    h.llm.onPrompt("main work", responds("working..."), pushTask("AAA", "some prompt"));
-    h.llm.onPrompt("some prompt", taskAsk("Which database?"));
-    h.llm.onPrompt("[task-question: AAA]", responds("Let me check."));
-    h.llm.onPrompt("The answer is SQLite.", responds("Done."));
-    h.llm.onPrompt("[task-result: AAA]\n\nDone.", responds("Great!"));
-
-    try {
-      await h.prompt("main work");
-      await h.prompt("/start-task");
-      // Starting the task arms the relay, which suspends on its own — no
-      // manual /suspend-task needed.
-      await h.waitForAutoParked();
-      h.assertStatus("awaiting answer: AAA");
-
-      await h.prompt("/resume-task The answer is SQLite.");
       h.assertStatus("current task: AAA");
 
       await h.prompt("/finish-task");

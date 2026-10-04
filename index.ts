@@ -10,8 +10,8 @@ import {
   cmdResumeTask,
   cmdStartTask,
   cmdSuspendTask,
+  handleTaskBoundary,
   refreshTaskStatus,
-  rendererTaskQuestion,
   rendererTaskResult,
   setSkillsFromEvent,
   setModelRegistry,
@@ -21,13 +21,11 @@ import {
   TASK_BRANCH_SYSTEM_PROMPT,
   toolPushTask,
   toolResumeTask,
-  toolTaskAsk,
 } from "./src/index.js";
 
 export default function register(pi: ExtensionAPI): void {
   pi.registerTool(toolPushTask(pi));
   pi.registerTool(toolResumeTask(pi));
-  pi.registerTool(toolTaskAsk(pi));
   pi.registerCommand("start-task", cmdStartTask(pi));
   pi.registerCommand("discard-task", cmdDiscardTask(pi));
   pi.registerCommand("finish-task", cmdFinishTask(pi));
@@ -38,12 +36,16 @@ export default function register(pi: ExtensionAPI): void {
   pi.registerCommand("auto-stop", cmdAutoStop());
 
   pi.registerMessageRenderer("task-result", rendererTaskResult);
-  pi.registerMessageRenderer("task-question", rendererTaskQuestion);
 
-  // Session events for the task supervisor (auto / relay). The supervisor can
-  // be armed by /auto, /start-task, or /resume-task, so its park/wake and
-  // shutdown handling must not depend on the /auto command ever running.
+  // Session events for the task supervisor (auto mode). The supervisor is
+  // armed by /auto, so its park/wake and shutdown handling must not depend
+  // on the /auto command ever running.
   setupTaskSupervisor(pi);
+
+  // Flat draining outside the TUI: with auto armed, each settle boundary
+  // runs one supervisor action inside the current run, so agent_settled
+  // only fires when the queue is truly drained (RPC clients can rely on it).
+  pi.on("agent_before_settle", (event, ctx) => handleTaskBoundary(pi, event, ctx));
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (event.systemPromptOptions.skills?.length) {

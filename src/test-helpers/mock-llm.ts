@@ -39,8 +39,7 @@ export type MockLLMDescriptor =
   | ReturnType<typeof responds>
   | ReturnType<typeof thinks>
   | ReturnType<typeof pushTask>
-  | ReturnType<typeof resumeTask>
-  | ReturnType<typeof taskAsk>;
+  | ReturnType<typeof resumeTask>;
 
 export const responds = (text: string) => ({
   type: "response:text" as const,
@@ -63,11 +62,6 @@ export const resumeTask = (title: string | undefined, message: string) => ({
   type: "response:resume-task" as const,
   title,
   message,
-});
-
-export const taskAsk = (question: string) => ({
-  type: "response:task-ask" as const,
-  question,
 });
 
 type PromptRule = {
