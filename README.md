@@ -126,7 +126,7 @@ When a task starts, its branch receives the task text as a single message prefix
 The model is prompted to split work into tasks (one goal per task) and to pick one of three task roles per task, referenced in the prompt as `/skill:task-review`, `/skill:task-research`, or `/skill:task-implement`. When the task starts, each referenced role skill's `SKILL.md` is inlined into the branch's first message (deterministic loading — no dependence on the model reading file paths; any other resolvable skill can be seeded the same way, with a `/skill:<name>` token in the task prompt), shaping how the branch runs and reports:
 
 - **review** (fresh by default; fork when the review target exists only in the discussion) — independent review of code or a plan without author bias; reports findings with `file:line` and a verdict.
-- **research** (always fresh) — self-contained investigation; the report is the only deliverable that returns to the mainline.
+- **research** (always fresh) — self-contained investigation; the report returns to the mainline, with an optional Markdown doc as the durable carrier when the findings must outlive the transcript or the prompt asks for one.
 - **implement** (fork by default; fresh when the plan fits in the prompt and the mainline context is long) — builds from the plan just discussed; reports the change list, verification, and deviations.
 
 ### `/skill:` references in task prompts
