@@ -65,35 +65,35 @@ export default function register(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("session_start", async (event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     setModelRegistry(ctx.modelRegistry);
     captureToolOrder(pi.getActiveTools());
     syncTaskToolVisibility(pi, ctx.sessionManager);
-    // /auto is on by default for brand-new sessions. Synthesize the command
-    // through the normal extension-command dispatch: prompt() executes
-    // extension commands before model validation and appends no entry when
-    // the command handles the message, so the sole visible effects are the
-    // /auto notify and the auto status prefix, and the two byte-stable
+    // /auto is on by default for rpc sessions only. An RPC client has no
+    // interactive surface where a human confirms each step: with the
+    // supervisor unarmed, agent_before_settle never drains the queue, so a
+    // pushed task neither starts nor produces the single agent_settled that
+    // ends the request (the client would see "done" with the task still
+    // queued). TUI sessions keep the manual model — tree navigation is a
+    // human-confirmed workflow — and /auto-stop still turns supervision off.
+    // Synthesis goes through the normal extension-command dispatch: prompt()
+    // executes extension commands before model validation and appends no entry
+    // when the command handles the message, so the sole visible effects are
+    // the /auto notify and the auto status prefix, and the two byte-stable
     // system prompts stay untouched. The dispatched command context carries
-    // the navigation actions the supervisor loop captures, so queued tasks
-    // run without /auto ever being typed. Reason semantics: "startup" is the
-    // first frame of a normal launch, "new" a /new (runtime replacement)
-    // frame; both can still carry a restored old session, so arm only when
-    // this session holds no message entries yet (a fresh session has none
-    // before its first model turn). "resume"/"fork"/"reload" sessions and
-    // restored ones keep their previous state; /auto-stop turns it off for
-    // the session.
-    if (event.reason === "startup" || event.reason === "new") {
-      const freshSession = !ctx.sessionManager.getEntries().some((e) => e.type === "message");
-      if (freshSession) {
-        try {
-          // expandPromptTemplates routes "/auto" through the extension-command
-          // pipeline (pi 0.87.1+ forwards it natively); without it the text
-          // would reach the model instead of the command handler.
-          pi.sendUserMessage("/auto", { expandPromptTemplates: true });
-        } catch {
-          // Never let a synthesized /auto break session startup.
-        }
+    // the navigation actions the supervisor loop captures. Every rpc frame
+    // arms, whatever its reason ("startup", "new", "resume" for a --session
+    // restore, "fork", "reload"): supervisor state is in-memory, so a
+    // restored session carries no earlier /auto-stop to honor, and gating on
+    // "fresh" would leave a resumed rpc session unable to drain its queue.
+    if (ctx.mode === "rpc") {
+      try {
+        // expandPromptTemplates routes "/auto" through the extension-command
+        // pipeline (pi 0.87.1+ forwards it natively); without it the text
+        // would reach the model instead of the command handler.
+        pi.sendUserMessage("/auto", { expandPromptTemplates: true });
+      } catch {
+        // Never let a synthesized /auto break session startup.
       }
     }
     refreshTaskStatus(ctx);

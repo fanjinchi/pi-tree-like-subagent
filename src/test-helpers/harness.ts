@@ -58,6 +58,13 @@ export interface TestHarnessOptions {
    * against. Pass "rpc" to exercise the in-run boundary drain.
    */
   mode?: ExtensionMode;
+  /**
+   * Runs after the in-memory SessionManager exists but before the session
+   * boots, i.e. before the session_start frame is emitted. Use it to
+   * simulate a restored transcript (`--session`): only Pi-produced entries
+   * (user/assistant messages) belong here, never task state.
+   */
+  seedSession?: (sessionManager: SessionManager) => void;
 }
 
 export class TestHarness {
@@ -103,6 +110,7 @@ export class TestHarness {
       retry: { enabled: false },
     });
     const sessionManager = SessionManager.inMemory(cwd);
+    options.seedSession?.(sessionManager);
     const llm = new MockLLM();
     const user = new MockUser();
     const fauxProvider = new FauxProvider(llm, (text) => user.matchAssistant(text));

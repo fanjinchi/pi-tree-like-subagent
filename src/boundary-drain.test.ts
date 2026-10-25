@@ -153,6 +153,11 @@ describe("boundary drain (rpc flat mode)", () => {
 
   it("leaves queued tasks parked and settles normally when auto is off", async () => {
     const h = await TestHarness.create({ mode: "rpc" });
+    // Rpc sessions arm auto by default; opt out the way a client would. With
+    // the supervisor stopped the boundary gate stays inert, so the queued task
+    // is never drained and the run settles honestly.
+    await h.prompt("/auto-stop");
+    await h.waitForAutoParked();
     h.llm.onPrompt("main work", pushTask("A", "do A", true), responds("queued"));
 
     try {
@@ -403,10 +408,13 @@ function lastAssistantContextText(h: TestHarness): string {
     .join("\n");
 }
 
-/** RPC-mode harness with the auto supervisor armed and parked. */
+/**
+ * Rpc-mode harness with the auto supervisor armed and parked. Rpc sessions
+ * arm auto at session_start (that is the default-on rule), so no `/auto` is
+ * typed here: every test using this helper exercises the default path.
+ */
 async function createRpcAutoHarness(): Promise<TestHarness> {
   const h = await TestHarness.create({ mode: "rpc" });
-  await h.prompt("/auto");
   await h.waitForAutoParked();
   return h;
 }
