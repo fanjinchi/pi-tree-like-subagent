@@ -45,10 +45,11 @@ import { MockUser, type MockUserAction } from "./mock-user.js";
 export interface TestHarnessOptions {
   /**
    * Reason reported by the session_start frame emitted at bind time. Defaults
-   * to "resume" — the harness acts like a restored / non-fresh session, so
-   * /auto is never synthesized; that is the behavior all pre-existing tests
-   * assume. Pass `{ type: "session_start", reason: "startup" }` to simulate
-   * a production launch's first frame and exercise default-on auto.
+   * to "resume" — a legal frame the extension never consults, so the default
+   * keeps TUI test sessions (the harness default) unarmed: the synthetic
+   * /auto is gated on `mode === "rpc"`, not on this. Pass
+   * `{ type: "session_start", reason: "startup" }` to simulate a production
+   * launch's first frame — the shape a `--session` restore reuses as well.
    */
   sessionStartEvent?: SessionStartEvent;
   /**
@@ -156,9 +157,10 @@ export class TestHarness {
       model: FAUX_MODEL,
       thinkingLevel: "off" as const,
       noTools: "builtin",
-      // Default to a non-fresh frame: pre-existing tests must never see the
-      // synthesized /auto. "resume" is a legal reason (types.d.ts) and
-      // matches the harness acting as a restored session.
+      // Default to a frame the extension ignores: TUI sessions (the harness
+      // default) never see the synthesized /auto because arming is gated on
+      // rpc mode alone, and rpc sessions arm whatever the reason. "resume" is
+      // a legal reason (types.d.ts).
       sessionStartEvent: options.sessionStartEvent ?? {
         type: "session_start",
         reason: "resume",

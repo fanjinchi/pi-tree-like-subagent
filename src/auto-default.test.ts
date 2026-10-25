@@ -35,13 +35,13 @@ describe("auto is on by default for rpc sessions only", () => {
 
   it("arms on a resumed rpc session that already holds a transcript", async () => {
     // The plugin-style launch (`pi --mode rpc --session <id>`) reopens an
-    // existing session, so the frame's reason is "resume" and the transcript
-    // is not empty. The pre-rpc-only rule gated on "no message entries yet"
-    // and left such a session unsupervised, which meant a pushed task never
-    // drained and the client never got its settle.
+    // existing session: it reuses the default "startup" frame, so what used to
+    // keep such a session unsupervised was the old gate's transcript check,
+    // not the frame's reason. A pushed task otherwise never drained and the
+    // client never got its settle.
     const h = await TestHarness.create({
       mode: "rpc",
-      sessionStartEvent: RESUME_SESSION,
+      sessionStartEvent: STARTUP_SESSION,
       seedSession: (sessionManager) => {
         sessionManager.appendMessage({
           role: "user",
@@ -51,6 +51,9 @@ describe("auto is on by default for rpc sessions only", () => {
       },
     });
     try {
+      // The restore really landed: the transcript is non-empty, which is what
+      // the old gate rejected.
+      h.assertSession(user("earlier turn"));
       h.assertLastNotification(AUTO_NOTIFY);
       await h.waitForAutoParked();
 
@@ -156,12 +159,14 @@ describe("auto is on by default for rpc sessions only", () => {
 /**
  * Auto defaults to on for rpc sessions only: the root index.ts session_start
  * handler synthesizes "/auto" through the normal extension-command dispatch
- * whenever `ctx.mode === "rpc"`, whatever the frame's reason. An RPC client
- * has no interactive surface for per-step confirmation and relies on
- * agent_settled to know the work is done, so an unarmed supervisor would
- * leave the queue undrained and settle anyway. TUI sessions keep the manual
- * model, and the harness default frame (reason "resume") stays a legal frame
- * for both.
+ * whenever `ctx.mode === "rpc"`, and never inspects the frame's reason — a
+ * production `pi --mode rpc --session <id>` restore arrives as "startup" with
+ * a non-empty transcript, which is what the old fresh-session gate rejected.
+ * An RPC client has no interactive surface for per-step confirmation and
+ * relies on agent_settled to know the work is done, so an unarmed supervisor
+ * would leave the queue undrained and settle anyway. TUI sessions keep the
+ * manual model, and the harness default frame (reason "resume") stays a legal
+ * frame for both.
  */
 
 const STARTUP_SESSION: SessionStartEvent = { type: "session_start", reason: "startup" };

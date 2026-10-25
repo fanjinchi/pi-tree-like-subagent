@@ -82,18 +82,23 @@ export default function register(pi: ExtensionAPI): void {
     // the /auto notify and the auto status prefix, and the two byte-stable
     // system prompts stay untouched. The dispatched command context carries
     // the navigation actions the supervisor loop captures. Every rpc frame
-    // arms, whatever its reason ("startup", "new", "resume" for a --session
-    // restore, "fork", "reload"): supervisor state is in-memory, so a
-    // restored session carries no earlier /auto-stop to honor, and gating on
-    // "fresh" would leave a resumed rpc session unable to drain its queue.
+    // arms, whatever its reason ("startup" for a CLI launch, which a
+    // --session restore reuses; "resume"/"new"/"fork" from an in-process
+    // replacement; "reload"): supervisor state is in-memory, so a restored
+    // session carries no earlier /auto-stop to honor, and gating on "fresh"
+    // — the old gate's transcript check — would leave a --session restore
+    // unable to drain its queue.
     if (ctx.mode === "rpc") {
       try {
         // expandPromptTemplates routes "/auto" through the extension-command
         // pipeline (pi 0.87.1+ forwards it natively); without it the text
         // would reach the model instead of the command handler.
         pi.sendUserMessage("/auto", { expandPromptTemplates: true });
-      } catch {
-        // Never let a synthesized /auto break session startup.
+      } catch (error) {
+        // Never let a synthesized /auto break session startup — but never
+        // swallow it silently either: an unarmed supervisor means the queue
+        // is never drained, and the client's agent_settled is then a lie.
+        console.error(`[pi-tree-like-subagent] failed to arm /auto for the rpc session: ${error}`);
       }
     }
     refreshTaskStatus(ctx);

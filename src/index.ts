@@ -189,7 +189,7 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
     promptSnippet: "Queue a resume of a suspended task branch with a message.",
     promptGuidelines: [
       "Use resume-task to send follow-up input (review findings or corrections) into a task that finished, aborted, or was suspended.",
-      "resume-task queues the resume; while auto mode is on it executes automatically (auto is armed by /auto and stopped by /auto-stop); with auto off it takes effect when the user runs /resume-task or /auto.",
+      "resume-task queues the resume; while auto mode is on it executes automatically (rpc sessions arm it by default and `/auto-stop` turns it off; other modes need `/auto`); with auto off it takes effect when the user runs /resume-task or /auto.",
       "resume-task notifies the user itself; do not write any further text in the same turn after calling it.",
       "Do not batch multiple resume-task calls together, and do not mix resume-task with other tool calls in the same turn.",
     ],
