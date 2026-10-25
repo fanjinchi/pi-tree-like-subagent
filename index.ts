@@ -95,10 +95,17 @@ export default function register(pi: ExtensionAPI): void {
         // would reach the model instead of the command handler.
         pi.sendUserMessage("/auto", { expandPromptTemplates: true });
       } catch (error) {
-        // Never let a synthesized /auto break session startup — but never
-        // swallow it silently either: an unarmed supervisor means the queue
-        // is never drained, and the client's agent_settled is then a lie.
-        console.error(`[pi-tree-like-subagent] failed to arm /auto for the rpc session: ${error}`);
+        // This catch only guards a *synchronous* throw. sendUserMessage is
+        // fire-and-forget (it returns void): a delivery that fails later is
+        // reported by pi as an extension_error frame, which the rpc client
+        // sees, so it never lands here. The synchronous path is pi's extension
+        // API refusing a stale or unloaded extension instance — and that must
+        // not take the rest of session_start down with it (the status refresh
+        // below would be skipped).
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[pi-tree-like-subagent] failed to arm /auto for the rpc session: ${message}`,
+        );
       }
     }
     refreshTaskStatus(ctx);
