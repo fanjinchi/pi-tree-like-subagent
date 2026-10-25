@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "fix": "prettier --write '**/*.ts' && eslint '**/*.ts' --fix",
-    "test": "tsx --test --test-timeout=30000 'src/**/*.test.ts' && tsx --test 'scripts/**/*.test.ts'",
+    "test": "tsx --test --test-timeout=30000 \"src/**/*.test.ts\" && tsx --test \"scripts/**/*.test.ts\"",
     "verify": "npx tsc --noEmit && eslint '**/*.ts' && npm test && prettier --check '**/*.ts'"
   },
   "keywords": [
