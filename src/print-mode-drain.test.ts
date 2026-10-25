@@ -9,10 +9,13 @@ import { pushTask, responds, TestHarness } from "./test-helpers/index.js";
  * supervised by default, but a leading `/auto` positional message arms them
  * (`pi -p "/auto" "…"`) and the same one-settle flat drain then applies.
  *
- * The leading command works because print mode hands every positional message
- * to `session.prompt(message)` with no options, so `expandPromptTemplates`
- * defaults to true and "/auto" goes through the extension-command pipeline
- * instead of reaching the model. The harness feeds the same two prompt calls.
+ * The leading command works because print mode hands positionals to
+ * `session.prompt`: the first one as `session.prompt(initialMessage, { images })`
+ * (print-mode.js), the rest as `session.prompt(message)` with no options at
+ * all. Neither passes `expandPromptTemplates`, so both fall back to pi's own
+ * default (true, agent-session.js) and "/auto" goes through the
+ * extension-command pipeline instead of reaching the model. The harness feeds
+ * the same calls via `promptAsCli`, which like the CLI injects no options.
  */
 describe("boundary drain (print mode)", () => {
   it("drains a queued task inside one run when /auto leads the messages", async () => {
@@ -24,16 +27,18 @@ describe("boundary drain (print mode)", () => {
     try {
       // Production shape: the first positional message is the command, the
       // second one is the actual request.
-      await h.prompt("/auto");
+      await h.promptAsCli("/auto");
       await h.waitForAutoParked();
       h.assertLastNotification(
         "Auto mode on. Queued tasks run and finish automatically. /auto-stop turns it off.",
       );
 
-      await h.prompt("main work");
+      await h.promptAsCli("main work");
 
       // The whole chain (start -> task run -> result -> mainline answer) is one
-      // run: the client sees a single agent_settled, after the mainline replied.
+      // run, and one run settles exactly once: agent_settled is the json
+      // frame's completion contract; in text mode the equivalent signal is the
+      // single process exit that follows.
       assert.strictEqual(h.settledCount(), 1, "exactly one settle for the whole drain");
       assert.strictEqual(h.countBranchCustomEntries("task-start"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-done"), 1);

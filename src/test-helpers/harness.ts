@@ -431,12 +431,30 @@ export class TestHarness {
   }
 
   async prompt(text: string): Promise<void> {
-    const knownEntryIds = new Set(this.sessionManager.getEntries().map((entry) => entry.id));
-
-    await this.session.prompt(text, {
+    await this.promptWith(text, {
       expandPromptTemplates: true,
       source: "test" as InputSource,
     });
+  }
+
+  /**
+   * Prompt the way the print-mode CLI does: `session.prompt(text)` with no
+   * options (print-mode.js passes only `{images}` for the first positional
+   * message), so `expandPromptTemplates` keeps pi's own default. Use this for
+   * production contracts — `prompt()` above injects an explicit `true`, which
+   * would keep a test green if that default ever flipped to false.
+   */
+  async promptAsCli(text: string): Promise<void> {
+    await this.promptWith(text);
+  }
+
+  private async promptWith(
+    text: string,
+    options?: Parameters<AgentSession["prompt"]>[1],
+  ): Promise<void> {
+    const knownEntryIds = new Set(this.sessionManager.getEntries().map((entry) => entry.id));
+
+    await this.session.prompt(text, options);
     await this.session.agent.waitForIdle();
     // pi 0.87.1: agent runs triggered inside extension commands are dispatched
     // with their own settle cadence (deferred prompt queue flushed after the
