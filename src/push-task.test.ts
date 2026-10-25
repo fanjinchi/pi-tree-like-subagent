@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   assistant,
@@ -239,7 +240,7 @@ describe("push-task skill resolution", () => {
 
   it("inlines the resolved role skill into the delivered task prompt", async () => {
     const h = await TestHarness.create();
-    const skillPath = new URL("../skills/task-review/SKILL.md", import.meta.url).pathname;
+    const skillPath = fileURLToPath(new URL("../skills/task-review/SKILL.md", import.meta.url));
     const skillContent = await readFile(skillPath, "utf8");
     h.llm.onPrompt(
       "main work",
@@ -292,7 +293,7 @@ describe("push-task skill resolution", () => {
 
   it("falls back to the extension's own skills dir when the registry is empty", async () => {
     const h = await TestHarness.create();
-    const skillPath = new URL("../skills/task-review/SKILL.md", import.meta.url).pathname;
+    const skillPath = fileURLToPath(new URL("../skills/task-review/SKILL.md", import.meta.url));
     const skillContent = await readFile(skillPath, "utf8");
     h.llm.onPrompt(
       "main work",
@@ -1049,10 +1050,10 @@ const TASK_REVIEW_SKILL: Skill = {
   name: "task-review",
   description:
     "Role card for review tasks queued via push-task: independent review of code or a plan, no author bias",
-  filePath: new URL("../skills/task-review/SKILL.md", import.meta.url).pathname,
-  baseDir: new URL("../skills/task-review", import.meta.url).pathname,
+  filePath: fileURLToPath(new URL("../skills/task-review/SKILL.md", import.meta.url)),
+  baseDir: fileURLToPath(new URL("../skills/task-review", import.meta.url)),
   sourceInfo: {
-    path: new URL("../skills/task-review/SKILL.md", import.meta.url).pathname,
+    path: fileURLToPath(new URL("../skills/task-review/SKILL.md", import.meta.url)),
     source: "project",
     scope: "project",
     origin: "package",
