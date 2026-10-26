@@ -1,3 +1,5 @@
+import type { JsonObject } from "@earendil-works/pi-ai";
+
 export class MockLLM {
   private readonly promptRules: PromptRule[] = [];
 
@@ -40,7 +42,8 @@ export type MockLLMDescriptor =
   | ReturnType<typeof thinks>
   | ReturnType<typeof fails>
   | ReturnType<typeof pushTask>
-  | ReturnType<typeof resumeTask>;
+  | ReturnType<typeof resumeTask>
+  | ReturnType<typeof callsTool>;
 
 export const responds = (text: string) => ({
   type: "response:text" as const,
@@ -75,6 +78,17 @@ export const resumeTask = (title: string | undefined, message: string) => ({
   type: "response:resume-task" as const,
   title,
   message,
+});
+
+/**
+ * A plain tool call for tools the harness has no dedicated descriptor for
+ * (e.g. list-tasks). The call keeps the turn going, so a test that wants a
+ * following reply should register the next round with onPromptSequence.
+ */
+export const callsTool = (name: string, args: JsonObject = {}) => ({
+  type: "response:tool-call" as const,
+  name,
+  args,
 });
 
 type PromptRule = {

@@ -211,6 +211,8 @@ function makeAssistantMessage(responses: MockLLMDescriptor[]): AssistantMessage 
           },
           { id: `call-${index + 1}` },
         );
+      case "response:tool-call":
+        return piAi.fauxToolCall(descriptor.name, descriptor.args, { id: `call-${index + 1}` });
     }
   });
 

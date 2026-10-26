@@ -19,12 +19,14 @@ import {
   syncTaskToolVisibility,
   taskBranchSystemPromptAppend,
   TASK_BRANCH_SYSTEM_PROMPT,
+  toolListTasks,
   toolPushTask,
   toolResumeTask,
 } from "./src/index.js";
 
 export default function register(pi: ExtensionAPI): void {
   pi.registerTool(toolPushTask(pi));
+  pi.registerTool(toolListTasks());
   pi.registerTool(toolResumeTask(pi));
   pi.registerCommand("start-task", cmdStartTask(pi));
   pi.registerCommand("discard-task", cmdDiscardTask(pi));

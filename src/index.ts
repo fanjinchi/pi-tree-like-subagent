@@ -101,6 +101,28 @@ You are inside a queued task branch: this task is already running. The mainline 
 - Work to completion and make your final message the full report.
 `;
 
+/** Cap on the single-line checkpoint excerpt shown per row. */
+export const TASK_LIST_CHECKPOINT_MAX = 120;
+
+/** One rendered task: what `list-tasks` reports and resume-task matches by title. */
+export interface TaskListRow {
+  title: string;
+  status: TaskListStatus;
+  /** One-line excerpt of the latest checkpoint, when the task has one. */
+  checkpoint?: string;
+  /** True when resume-task can reopen this task at its checkpoint. */
+  resumable: boolean;
+}
+
+/** Fixed, lowercase status vocabulary so the model and the tests can match it. */
+export type TaskListStatus =
+  | "running"
+  | "queued"
+  | "interrupted"
+  | "aborted"
+  | "finished"
+  | "discarded";
+
 export function toolPushTask(pi: PushTaskAPI): ToolDefinition {
   return defineTool({
     name: "push-task",
@@ -262,6 +284,64 @@ export function toolResumeTask(pi: ResumeTaskAPI): ToolDefinition {
       };
     },
   });
+}
+
+/**
+ * Model-visible query over the task bookkeeping entries: the mainline cannot
+ * see `task` / `task-start` / `task-done` / `task-suspended` (custom entries are
+ * model-invisible) and finished epochs get their transcript masked, so without
+ * this tool a session with several tasks loses the titles it would need to call
+ * resume-task. Read-only: no entries, status, or notifications.
+ *
+ * Static description only (cache constraint): no live supervisor state, no
+ * titles - the payload is the tool result, never the prompt.
+ */
+export function toolListTasks(): ToolDefinition {
+  return defineTool({
+    name: "list-tasks",
+    label: "List Tasks",
+    description:
+      "List the tasks of this session newest first, with their status and whether they can be resumed, so an earlier task can be found again by title.",
+    promptSnippet: "List this session's tasks with their status and whether they can be resumed.",
+    promptGuidelines: [
+      "Call list-tasks when you need the title or current state of a task started earlier in this session: task bookkeeping is model-invisible, and a finished task's transcript is masked, so the task results still in the conversation may be the only stale trace left.",
+      'Rows marked "resumable" can be reopened with resume-task(title, message); the quoted title is exactly what resume-task matches (matching already ignores whitespace and marker characters), so pass it through unchanged.',
+      "list-tasks is read-only and changes no task state. Query first, then call resume-task in a later turn when the answer says to - do not query and resume in the same turn, and never batch resumes.",
+    ],
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      return {
+        content: [{ type: "text", text: listTasksText(ctx.sessionManager) }],
+        details: {},
+      };
+    },
+  });
+}
+
+/** Rendered listing for the current branch (pure: reads session entries only). */
+export function listTasksText(session: ReadonlySessionLike): string {
+  const rows = taskListRows(session);
+  if (rows.length === 0) return "No tasks in this session.";
+
+  // The listing is the model's only view of the bookkeeping (custom entries are
+  // invisible, task transcripts are masked), so cap it: 20 rows stay quotable.
+  const shown = rows.slice(0, 20);
+  const omitted = rows.length - shown.length;
+  const lines = [
+    omitted > 0
+      ? `Tasks in this session: ${rows.length} (newest first; showing the newest ${shown.length}, ${omitted} older omitted)`
+      : `Tasks in this session: ${rows.length} (newest first)`,
+  ];
+
+  for (const row of shown) {
+    lines.push("", `- "${row.title}" - ${row.status}${row.resumable ? ", resumable" : ""}`);
+    if (row.checkpoint !== undefined) lines.push(`  checkpoint: ${row.checkpoint}`);
+    if (row.resumable) {
+      lines.push(`  resume with resume-task(title: "${row.title}", message: ...)`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 export function cmdStartTask(pi: TaskCommandAPI): CommandOptions {
@@ -685,6 +765,183 @@ type TaskActionOptions = {
 type ResumeTaskParams = Static<typeof resumeTaskParameters>;
 
 type ResumeTaskAPI = Pick<ExtensionAPI, "appendEntry">;
+
+/** All tasks on the branch, newest first (grouped: one row per task, runs merged). */
+function taskListRows(session: ReadonlySessionLike): TaskListRow[] {
+  const pendingIds = new Set(pendingTasks(session).map((task) => task.id));
+  const running = currentTask(session);
+  return collectTaskListGroups(session)
+    .map((group) => taskListRow(group, pendingIds, running))
+    .reverse();
+}
+
+/**
+ * Group the branch's task entries by task, preserving first-appearance order.
+ *
+ * The grouping key is the queued `task` entry id carried by `taskEntryId` - a
+ * task that was resumed leaves several `task-start` / `task-suspended` entries,
+ * all naming the same task entry, and they must collapse into one row. Legacy
+ * entries without an id group by normalized title instead (the pre-FIFO
+ * accounting did the same by title).
+ */
+function collectTaskListGroups(session: ReadonlySessionLike): TaskListGroup[] {
+  const groups = new Map<string, TaskListGroup>();
+  const keyByTitle = new Map<string, string>();
+
+  const groupFor = (key: string, title: string, taskEntryId?: string): TaskListGroup => {
+    let group = groups.get(key);
+    if (!group) {
+      group = { title, started: false, events: [] };
+      groups.set(key, group);
+    }
+    if (taskEntryId !== undefined && group.taskEntryId === undefined) {
+      group.taskEntryId = taskEntryId;
+    }
+    return group;
+  };
+
+  const keyFor = (data: {
+    taskEntryId?: string;
+    title?: string;
+  }): { key: string; title: string } => {
+    const title = data.title?.trim() || "untitled";
+    if (data.taskEntryId !== undefined) {
+      return { key: `id:${data.taskEntryId}`, title };
+    }
+    const normalized = taskMarkerTitle(data.title);
+    return { key: keyByTitle.get(normalized) ?? `title:${normalized}`, title };
+  };
+
+  for (const entry of session.getBranch()) {
+    if (entry.type !== "custom") continue;
+
+    if (entry.customType === TASK_ENTRY_TYPE && isTaskData(entry.data)) {
+      const key = `id:${entry.id}`;
+      groupFor(key, entry.data.title?.trim() || "untitled", entry.id);
+      // Legacy start/done/suspended entries carry no taskEntryId; let them
+      // resolve to the queued task they belong to by title.
+      keyByTitle.set(taskMarkerTitle(entry.data.title), key);
+      continue;
+    }
+
+    if (isTaskStartEntry(entry)) {
+      const { key, title } = keyFor(entry.data);
+      groupFor(key, title, entry.data.taskEntryId).started = true;
+      continue;
+    }
+
+    if (isTaskDoneEntry(entry)) {
+      const { key, title } = keyFor(entry.data);
+      groupFor(key, title, entry.data.taskEntryId).events.push({ kind: "done", data: entry.data });
+      continue;
+    }
+
+    if (isTaskSuspendedEntry(entry)) {
+      const { key, title } = keyFor(entry.data);
+      groupFor(key, title, entry.data.taskEntryId).events.push({
+        kind: "suspended",
+        data: entry.data,
+      });
+    }
+  }
+
+  return [...groups.values()];
+}
+
+/**
+ * Status derivation, in priority order: the open run wins over a re-queued
+ * task (an abort leaves the task entry pending again), which wins over the
+ * state recorded by the *newest* terminal entry. That ordering matters for a
+ * resumed task: its old `task-suspended{reason:"interrupted"}` is older than
+ * the completion that closed the resumed run, and reporting the stale
+ * suspension would call a finished task interrupted. `discarded` is the one
+ * state with no `reason` marker: /discard-task consumes the queued task entry
+ * with a `task-done` and never starts it.
+ */
+function taskListRow(
+  group: TaskListGroup,
+  pendingIds: ReadonlySet<string>,
+  running: TaskStartEntry | null,
+): TaskListRow {
+  const last = group.events[group.events.length - 1];
+  const suspend = last?.kind === "suspended" ? last.data : undefined;
+  const done = last?.kind === "done" ? last.data : undefined;
+  const checkpoint = newestCheckpoint(group.events);
+
+  let status: TaskListStatus;
+  if (running && taskStartMatchesGroup(running, group)) {
+    status = "running";
+  } else if (group.taskEntryId !== undefined && pendingIds.has(group.taskEntryId)) {
+    status = "queued";
+  } else if (suspend?.reason === "interrupted") {
+    status = "interrupted";
+  } else if (suspend?.reason === "aborted" || done?.reason === "aborted") {
+    status = "aborted";
+  } else if (!group.started && done !== undefined) {
+    // Never ran, but its queued entry was consumed: /discard-task.
+    status = "discarded";
+  } else if (last !== undefined) {
+    status = "finished";
+  } else {
+    // No terminal entry yet and the accounting no longer sees the task as
+    // pending (e.g. the above branch was cut): never claim it finished.
+    status = "queued";
+  }
+
+  return {
+    title: group.title,
+    status,
+    ...(checkpoint !== undefined ? { checkpoint } : {}),
+    resumable: group.events.some(
+      (event) => event.kind === "suspended" || taskListCheckpoint(event.data.content) !== undefined,
+    ),
+  };
+}
+
+/** Newest checkpoint text: the latest suspension/completion that carries one. */
+function newestCheckpoint(events: readonly TaskGroupEvent[]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const checkpoint = taskListCheckpoint(events[index]?.data.content);
+    if (checkpoint !== undefined) return checkpoint;
+  }
+  return undefined;
+}
+
+/** Whether an open run belongs to this task (id when recorded, title for legacy). */
+function taskStartMatchesGroup(start: TaskStartEntry, group: TaskListGroup): boolean {
+  if (start.data.taskEntryId !== undefined) return start.data.taskEntryId === group.taskEntryId;
+  return taskMarkerTitle(start.data.title) === taskMarkerTitle(group.title);
+}
+
+/** Bookkeeping entries of one task, merged across its runs (resumes included). */
+interface TaskListGroup {
+  title: string;
+  taskEntryId?: string;
+  started: boolean;
+  /** Suspensions and completions in branch order, so merging keeps the newest state. */
+  events: TaskGroupEvent[];
+}
+
+type TaskGroupEvent =
+  | { kind: "suspended"; data: TaskSuspendedData }
+  | { kind: "done"; data: TaskDoneData };
+
+/** Single-line, length-capped checkpoint excerpt, or undefined when empty. */
+function taskListCheckpoint(text?: string): string | undefined {
+  if (typeof text !== "string") return undefined;
+  const singleLine = text.replace(/\s+/g, " ").trim();
+  if (singleLine === "") return undefined;
+  if (singleLine.length <= TASK_LIST_CHECKPOINT_MAX) return singleLine;
+  return `${singleLine.slice(0, TASK_LIST_CHECKPOINT_MAX - 3).trimEnd()}...`;
+}
+
+function isTaskDoneEntry(
+  entry: SessionEntry,
+): entry is CustomEntry<typeof TASK_DONE_ENTRY_TYPE, TaskDoneData> {
+  return (
+    entry.type === "custom" && entry.customType === TASK_DONE_ENTRY_TYPE && isRecord(entry.data)
+  );
+}
 
 /**
  * The widget key of the persistent in-branch indicator above the editor.
@@ -1148,7 +1405,7 @@ function applyTaskToolSet(pi: ToolVisibilityAPI, inTaskBranch: boolean): void {
  */
 const TASK_BRANCH_ONLY_TOOLS: string[] = [];
 
-const MAINLINE_ONLY_TOOLS = ["push-task", "resume-task"];
+const MAINLINE_ONLY_TOOLS = ["push-task", "list-tasks", "resume-task"];
 
 type ToolVisibilityAPI = Pick<ExtensionAPI, "getActiveTools" | "setActiveTools">;
 

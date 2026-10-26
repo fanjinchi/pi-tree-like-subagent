@@ -60,7 +60,7 @@ If Pi is already running, restart it or run `/reload`.
 
 Pi coding agent doesn't include a built-in sub-agent tool. Its author [Mario Zechner](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/) explains why: they're "a black box within a black box" — you can't see what they do, context doesn't transfer well, and debugging is painful. Pi's session tree gives you that control instead.
 
-This extension adds a minimal task system that keeps those principles: minimal, in your control, nothing hidden. It introduces a few tools (`push-task`, `resume-task`) and commands. No background processes, no parallel agents — one foreground serial loop supervises task work in the TUI (the `/auto` loop), and outside the TUI a settle-boundary handler drains queued tasks inline so RPC clients get exactly one honest `agent_settled`. The loop parks when it has nothing to do (no timers, no polling), and `/auto-stop` turns it off. In the TUI a task runs as a branch in the session tree, so standard Pi tools work as expected, and every state transition is a visible entry you can navigate to. Start a fresh-context review, check the results, bring them back. Fork an implementation task with the current discussion as its context. Resume a finished task with review findings. Or queue tasks and run them hands-free with `/auto`, while still seeing everything that's happening and able to stop, reprompt, and continue at any point.
+This extension adds a minimal task system that keeps those principles: minimal, in your control, nothing hidden. It introduces a few tools (`push-task`, `list-tasks`, `resume-task`) and commands. No background processes, no parallel agents — one foreground serial loop supervises task work in the TUI (the `/auto` loop), and outside the TUI a settle-boundary handler drains queued tasks inline so RPC clients get exactly one honest `agent_settled`. The loop parks when it has nothing to do (no timers, no polling), and `/auto-stop` turns it off. In the TUI a task runs as a branch in the session tree, so standard Pi tools work as expected, and every state transition is a visible entry you can navigate to. Start a fresh-context review, check the results, bring them back. Fork an implementation task with the current discussion as its context. Resume a finished task with review findings. Or queue tasks and run them hands-free with `/auto`, while still seeing everything that's happening and able to stop, reprompt, and continue at any point.
 
 This extension also bundles the task role skills (`task-implement`, `task-research`, `task-review`) that `push-task` inlines into task prompts.
 
@@ -152,13 +152,30 @@ Two asymmetries are deliberate:
 - A **top-level** ref that resolves to nothing is reported to the **mainline** at push time (`Warning: /skill:<name> were not resolved.`) and stays in the stored prompt as a literal token. The author is still here and can fix it, so the branch gets no note for it.
 - A resolved ref whose file vanished since push falls back to the extension's own bundled `skills/<name>/SKILL.md`; only if both fail is it unreadable — and then the path reference already in the prompt lets the branch read the file itself.
 
+### `list-tasks` tool
+
+The read-only query over the task bookkeeping: the mainline gets `[task-result: <title>]` messages, but the `task` / `task-start` / `task-done` / `task-suspended` entries themselves are model-invisible, and a finished epoch's transcript is masked — after a few rounds nothing in the conversation tells the model which tasks it started or which one can be reopened. `list-tasks` (no parameters) prints the session's tasks newest first, one row per task however many times it was resumed, capped at the newest 20 (older ones are counted in the header):
+
+```
+Tasks in this session: 2 (newest first)
+
+- "repair the importer" - finished, resumable
+  checkpoint: Fixed the csv parser and added a regression test.
+  resume with resume-task(title: "repair the importer", message: ...)
+- "probe the API" - interrupted, resumable
+  checkpoint: Halfway through the probe...
+  resume with resume-task(title: "probe the API", message: ...)
+```
+
+Status is a fixed lowercase vocabulary: `running` (open branch), `queued` (still in the queue — an aborted TUI branch re-queues its task), `interrupted` (last turn cut off), `aborted` (closed without a result), `finished`, `discarded` (`/discard-task`). `resumable` means a real checkpoint exists (a `task-suspended` anchor, or the `task-done.content` a flat run leaves), i.e. `resume-task` can reopen it; the quoted title is exactly what `resume-task` matches (title matching already normalizes whitespace and marker characters). It writes nothing, changes no status, never notifies — the answer is the tool result, so querying is safe inside any turn.
+
 ### `resume-task` tool
 
-Queues a resume of a finished, aborted, or suspended task branch, carrying a `message` (review findings, answers, corrections) back into the task context. Optionally takes a `title` to pick a specific task (defaults to the most recent). Nothing runs until `/resume-task` or `/auto` executes the request. In the TUI the session navigates to the recorded branch leaf and the message is injected as a new user turn — the task AI continues with its full branch context intact. Outside the TUI (flat drain) there is no navigation: the task's checkpoint is re-injected together with the message, so the review-fix loop keeps working in RPC automation. An interrupted or aborted run leaves such a checkpoint behind (a `task-suspended` anchor), so its last partial output is what a flat resume starts from.
+Queues a resume of a finished, aborted, or suspended task branch, carrying a `message` (review findings, answers, corrections) back into the task context. Optionally takes a `title` to pick a specific task (defaults to the most recent). Nothing runs until `/resume-task` or `/auto` executes the request. In the TUI the session navigates to the recorded branch leaf and the message is injected as a new user turn — the task AI continues with its full branch context intact. Outside the TUI (flat drain) there is no navigation: the task's checkpoint is re-injected together with the message, so the review-fix loop keeps working in RPC automation. An interrupted or aborted run leaves such a checkpoint behind (a `task-suspended` anchor), so its last partial output is what a flat resume starts from. When the model no longer knows which task it wants, `list-tasks` supplies both the title and whether the task is resumable.
 
 ### Tool visibility is branch-scoped
 
-`push-task` and `resume-task` only appear outside task branches (session-level, not persisted; execute-time guards back it up). Note this means a task branch cannot queue nested tasks — orchestration stays on the mainline. If you disabled any of these tools via `/tools`, the visibility sync will re-enable them when the matching branch state applies.
+`push-task`, `list-tasks`, and `resume-task` only appear outside task branches (session-level, not persisted; execute-time guards back it up). Note this means a task branch cannot queue nested tasks — orchestration stays on the mainline. If you disabled any of these tools via `/tools`, the visibility sync will re-enable them when the matching branch state applies.
 
 A task that hits a decision it can't make should **say so in its report** — its final assistant message is the deliverable that returns to the mainline, which can answer and send a `resume-task` with the decision. Inside a TUI task branch the AI can also use a user-question plugin (such as `ask_user_question`) directly.
 
