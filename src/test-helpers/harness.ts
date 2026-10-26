@@ -66,6 +66,12 @@ export interface TestHarnessOptions {
    * (user/assistant messages) belong here, never task state.
    */
   seedSession?: (sessionManager: SessionManager) => void;
+  /**
+   * Keep the post-prompt sweep from failing the test on a provider error
+   * (assistant `stopReason: "error"`). Default false: an unexpected error
+   * turn is a broken fixture, but interruption tests produce one on purpose.
+   */
+  allowAssistantErrors?: boolean;
 }
 
 export class TestHarness {
@@ -77,6 +83,7 @@ export class TestHarness {
     private readonly testSession: TestSession,
     private readonly testUi: TestUi,
     private readonly fauxProvider: FauxProvider,
+    private readonly allowAssistantErrors = false,
     private handledSessionEntryIds = new Set<string>(),
   ) {}
 
@@ -182,6 +189,7 @@ export class TestHarness {
       testSession,
       testUi,
       fauxProvider,
+      options.allowAssistantErrors ?? false,
     );
 
     await session.bindExtensions({
@@ -284,6 +292,32 @@ export class TestHarness {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       },
       stopReason: "aborted",
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * The shape pi appends when an assistant turn fails after its retries are
+   * exhausted: no content blocks at all (see the 429 turns in real sessions),
+   * stopReason "error", and the provider message in errorMessage.
+   */
+  appendErrorAssistantTurn(errorMessage: string): void {
+    this.sessionManager.appendMessage({
+      role: "assistant",
+      content: [],
+      api: FAUX_MODEL.api,
+      provider: FAUX_MODEL.provider,
+      model: FAUX_MODEL.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "error",
+      errorMessage,
       timestamp: Date.now(),
     });
   }
@@ -473,14 +507,16 @@ export class TestHarness {
   }
 
   private throwIfNewAssistantError(knownEntryIds: ReadonlySet<string>): void {
-    const assistantError = this.sessionManager.getEntries().find((entry) => {
-      if (knownEntryIds.has(entry.id)) return false;
-      return (
-        entry.type === "message" &&
-        entry.message.role === "assistant" &&
-        entry.message.stopReason === "error"
-      );
-    });
+    const assistantError = this.allowAssistantErrors
+      ? undefined
+      : this.sessionManager.getEntries().find((entry) => {
+          if (knownEntryIds.has(entry.id)) return false;
+          return (
+            entry.type === "message" &&
+            entry.message.role === "assistant" &&
+            entry.message.stopReason === "error"
+          );
+        });
 
     if (assistantError?.type === "message" && assistantError.message.role === "assistant") {
       throw new Error(assistantError.message.errorMessage ?? "Assistant turn failed.");

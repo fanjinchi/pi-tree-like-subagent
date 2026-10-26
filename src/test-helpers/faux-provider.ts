@@ -174,12 +174,24 @@ function maybeRewriteAssistantEsc(
 }
 
 function makeAssistantMessage(responses: MockLLMDescriptor[]): AssistantMessage {
+  // A failing turn carries no content blocks: that is exactly the shape that
+  // used to leave the mainline with an empty task result.
+  const failure = responses.find((descriptor) => descriptor.type === "response:error");
+  if (failure) {
+    return piAi.fauxAssistantMessage("", {
+      stopReason: "error",
+      errorMessage: failure.errorMessage,
+    });
+  }
+
   const content = responses.map((descriptor, index) => {
     switch (descriptor.type) {
       case "response:text":
         return piAi.fauxText(descriptor.text);
       case "response:thinking":
         return piAi.fauxThinking(descriptor.text);
+      case "response:error":
+        throw new Error("unreachable: handled above");
       case "response:push-task":
         return piAi.fauxToolCall(
           "push-task",

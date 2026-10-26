@@ -38,12 +38,25 @@ export class MockLLM {
 export type MockLLMDescriptor =
   | ReturnType<typeof responds>
   | ReturnType<typeof thinks>
+  | ReturnType<typeof fails>
   | ReturnType<typeof pushTask>
   | ReturnType<typeof resumeTask>;
 
 export const responds = (text: string) => ({
   type: "response:text" as const,
   text,
+});
+
+/**
+ * A turn that fails the way exhausted retries do: pi appends an assistant
+ * message with an empty content array and stopReason "error". Use it to
+ * exercise the interruption paths (no report to deliver). Tests that expect
+ * one must opt in with `TestHarness.create({ allowAssistantErrors: true })`,
+ * otherwise the harness flags the error entry as an unexpected provider fault.
+ */
+export const fails = (errorMessage: string) => ({
+  type: "response:error" as const,
+  errorMessage,
 });
 
 export const thinks = (text: string) => ({

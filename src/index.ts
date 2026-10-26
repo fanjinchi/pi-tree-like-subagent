@@ -67,6 +67,18 @@ export const TASK_RESUME_FRAMING =
   "Your final assistant message is the report to the mainline.\n\n";
 
 /**
+ * Delivered in place of a task report when the epoch's final turn was cut off
+ * (stopReason "error" once retries are exhausted, or "aborted"). A task result
+ * must never be empty: an interrupted turn has no text blocks at all, and a
+ * silent or marker-only result leaves the mainline unable to tell "the task
+ * produced nothing" from "the task never ran". Dynamic details (the provider
+ * error, any partial output) follow this sentence.
+ */
+export const TASK_INTERRUPTED_FRAMING =
+  "Interrupted: this task did not produce a final report - its last turn was cut off before it could write one. " +
+  "Treat the work as incomplete; resume or re-dispatch the task if its outcome is still needed.";
+
+/**
  * Appended to the system prompt inside a task branch. A branch inherits the
  * mainline transcript *and* its system prompt, so nothing else in the prompt
  * tells the model that the task it can see being queued is already running -
@@ -637,6 +649,9 @@ export async function handleTaskBoundary(
   }
 }
 
+/** Notice delivered when a task ends without any text, interrupted or not. */
+const EMPTY_TASK_RESULT_NOTICE = "(The task finished without a text report.)";
+
 // ─── Boundary drain (non-TUI flat mode) ────────────────────────────────
 
 /** Shared non-TUI error for commands that navigate the session tree. */
@@ -860,12 +875,17 @@ async function boundaryDrainAction(
       typeof lastAssistantContent === "string"
         ? lastAssistantContent
         : lastAssistantContent?.map((block) => block.text).join("\n");
+    // Retries exhausted (stopReason "error") or a cancelled turn leave an
+    // assistant message with no text blocks at all; the branch's newest text
+    // is the only partial result left to carry.
+    const interruption = interruptionOf(lastAssistant);
+    const partialText = interruption ? lastTaskText(session, taskStart.id) : undefined;
 
     const doneData: TaskDoneData = {
       title,
       ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
       branchLeafId: session.getLeafId() ?? "",
-      ...(resultText ? { content: resultText } : {}),
+      ...(resultText || partialText ? { content: resultText || partialText } : {}),
       ...(taskStart.data.previousModel ? { previousModel: taskStart.data.previousModel } : {}),
     };
     const drafts: SessionBoundaryDraft[] = [
@@ -877,7 +897,21 @@ async function boundaryDrainAction(
     drafts.push(...collectTranscriptMaskDrafts(session, taskStart.id));
 
     let runContinuation: boolean;
-    if (resultText) {
+    if (interruption) {
+      // Never settle silently on an interrupted epoch: the mainline gets the
+      // interruption (cause + partial output) instead of an empty result. The
+      // continuation is what makes the client's final answer honest - an rpc
+      // client reads the newest assistant text, and settling here would hand
+      // it the pre-task narration as if it were the answer.
+      drafts.push({
+        type: "custom_message",
+        customType: "task-result",
+        content: interruptionReport(title, interruption, partialText),
+        display: true,
+        details: { title },
+      });
+      runContinuation = true;
+    } else if (resultText) {
       drafts.push({
         type: "custom_message",
         customType: "task-result",
@@ -898,7 +932,7 @@ async function boundaryDrainAction(
         drafts.push({
           type: "custom_message",
           customType: "task-result",
-          content: `${taskResultMarker(title)}(The task finished without a text report.)`,
+          content: `${taskResultMarker(title)}${EMPTY_TASK_RESULT_NOTICE}`,
           display: true,
           details: { title },
         });
@@ -1386,7 +1420,21 @@ async function runSupervisorLoop(
 
       const statusPrefix = AUTO_STATUS_PREFIX;
 
+      // An aborted turn ends supervision. So does an error turn on the
+      // mainline (no open epoch to close first): the model just failed, so
+      // routing the queue into it only burns retries. A task epoch whose last
+      // turn failed is finished first - finishTask closes its books and
+      // delivers the interruption report, then reports "interrupted" below.
+      // Flat mode leaves the loop armed: there it is only the boundary gate's
+      // marker, and disarming would strand the queue for later prompts.
       if (lastAssistantWasAborted(ctx.sessionManager)) break;
+      if (
+        ctx.mode === "tui" &&
+        !currentTask(ctx.sessionManager) &&
+        lastAssistantInterrupted(ctx.sessionManager)
+      ) {
+        break;
+      }
 
       // Outside the TUI the agent_before_settle boundary drains the queue
       // inside the current run (no navigation exists there); this loop only
@@ -1430,6 +1478,16 @@ async function runSupervisorLoop(
 
           const result = await finishTask(pi, ctx, { statusPrefix });
           if (result === "cancelled") break;
+          if (result === "interrupted") {
+            const queued = pendingTasks(ctx.sessionManager).length;
+            ctx.ui.notify(
+              queued > 0
+                ? `Auto stopped after an interrupted task: its interruption report was delivered; ${queued} queued task(s) stay pending. Re-run /auto to drain them.`
+                : "Auto stopped after an interrupted task: its interruption report was delivered.",
+              "warning",
+            );
+            break;
+          }
           continue;
         }
       }
@@ -1524,6 +1582,68 @@ function hasAssistantAfterTaskStart(session: ReadonlySessionLike, taskStartId: s
     if (afterTaskStart && isAssistantMessageEntry(entry)) return true;
   }
   return false;
+}
+
+/** Assistant turns that end a run without producing a report. */
+/**
+ * Interruption of the turn that just ended, read from its assistant message.
+ * `error` is the retry loop giving up (e.g. a 429 usage limit): pi appends the
+ * failed turn with an empty content array, so the branch has no report at all.
+ * `aborted` is a user cancel. Callers must read this BEFORE navigating away
+ * (TUI finish): after navigation the tip is the mainline's own last turn.
+ */
+function interruptionOf(
+  entry: (SessionMessageEntry & { message: { role: "assistant" } }) | undefined,
+): InterruptionInfo | undefined {
+  const stopReason = entry?.message.stopReason;
+  if (stopReason !== "error" && stopReason !== "aborted") return undefined;
+  const errorMessage = entry?.message.errorMessage?.trim();
+  return { stopReason, ...(errorMessage ? { errorMessage } : {}) };
+}
+
+interface InterruptionInfo {
+  stopReason: "error" | "aborted";
+  errorMessage?: string;
+}
+
+/**
+ * Newest text-bearing assistant message at or after a task-start entry
+ * (thinking/tool blocks dropped). An interrupted epoch's last turn has no text
+ * at all, so text-less turns are skipped instead of ending the search: the
+ * last text the branch did produce is the only partial result left to carry.
+ */
+function lastTaskText(session: ReadonlySessionLike, taskStartEntryId: string): string | undefined {
+  const branch = session.getBranch();
+  const startIndex = branch.findIndex((entry) => entry.id === taskStartEntryId);
+  if (startIndex === -1) return undefined;
+  for (let index = branch.length - 1; index > startIndex; index--) {
+    const entry = branch[index];
+    if (!isAssistantMessageEntry(entry)) continue;
+    const text = renderTextContent(entry.message.content).trim();
+    if (text !== "") return text;
+  }
+  return undefined;
+}
+
+/**
+ * Task-result payload for an interrupted epoch: the static framing, the
+ * provider error that ended the turn (first line, capped), and whatever text
+ * the branch produced before the cut. Never empty - see TASK_INTERRUPTED_FRAMING.
+ */
+function interruptionReport(
+  title: string,
+  interruption: InterruptionInfo,
+  partialText: string | undefined,
+): string {
+  const errorMessage = interruption.errorMessage?.split("\n")[0]?.trim();
+  // A raw provider body (429 JSON, stack trace) is long: quote its first line only.
+  const error = errorMessage
+    ? errorMessage.slice(0, 300)
+    : `the turn ended with stopReason "${interruption.stopReason}"`;
+  const partial = partialText
+    ? `\n\nLast output before the interruption (cut off, not a report):\n${partialText}`
+    : "";
+  return `${taskResultMarker(title)}⚠️ ${TASK_INTERRUPTED_FRAMING}\n\nCause: ${error}${partial}`;
 }
 
 async function startTask(
@@ -1642,7 +1762,12 @@ async function finishTask(
     ? taskResultTextContent(lastAssistant.message.content)
     : undefined;
   const lastAssistantId = lastAssistant?.id;
-  const checkpoint = lastAssistantText(ctx.sessionManager);
+  // An interrupted final turn (retries exhausted, cancelled) has no text at
+  // all, so the checkpoint and the report fall back to the newest text the
+  // branch did produce.
+  const interruption = interruptionOf(lastAssistant);
+  const partialText = interruption ? lastTaskText(ctx.sessionManager, taskStart.id) : undefined;
+  const checkpoint = interruption ? partialText : lastAssistantText(ctx.sessionManager);
 
   const title = taskMarkerTitle(taskStart.data.title);
   // Record the task-branch leaf so /resume-task can navigate back here.
@@ -1655,21 +1780,22 @@ async function finishTask(
 
   syncTaskToolVisibility(pi, ctx.sessionManager);
 
-  // Inject last assistant message after navigation
-  if (lastAssistantId && lastAssistantContent !== undefined) {
+  // Inject last assistant message after navigation. A task result is never
+  // empty: an interrupted turn carries no text blocks, and an empty or
+  // marker-only delivery reads as "the task never ran".
+  if (lastAssistantId) {
     // Normalize the captured content to plain text so it can be prefixed with
     // the result marker (text blocks are joined with newlines).
     const resultText =
       typeof lastAssistantContent === "string"
         ? lastAssistantContent
-        : lastAssistantContent.map((block) => block.text).join("\n");
+        : (lastAssistantContent ?? []).map((block) => block.text).join("\n");
     // Prefix the result with an explicit marker so the model recognizes it as
     // the task result (custom-message conversion drops customType/title, so a
-    // bare report reads like an ordinary user message). An empty result stays
-    // empty to avoid a dangling marker-only message.
-    const resultContent = resultText
-      ? `${taskResultMarker(title)}${resultText}`
-      : lastAssistantContent;
+    // bare report reads like an ordinary user message).
+    const resultContent = interruption
+      ? interruptionReport(title, interruption, partialText)
+      : `${taskResultMarker(title)}${resultText || EMPTY_TASK_RESULT_NOTICE}`;
     pi.sendMessage(
       {
         customType: "task-result",
@@ -1694,7 +1820,12 @@ async function finishTask(
   });
 
   const label = lastAssistantId ? "Last response attached." : "No last response to attach.";
-  ctx.ui.notify(`Task finished. ${label}`, "info");
+  ctx.ui.notify(
+    interruption
+      ? `Task interrupted (stopReason: ${interruption.stopReason}). An interruption report was delivered instead of a task result.`
+      : `Task finished. ${label}`,
+    interruption ? "warning" : "info",
+  );
 
   if (lastAssistantInterrupted(ctx.sessionManager)) {
     ctx.ui.notify(
@@ -1706,6 +1837,10 @@ async function finishTask(
   await restorePreviousModel(pi, taskStart, ctx);
 
   refreshTaskStatus(ctx, { prefix: options.statusPrefix });
+
+  // The loop owns the exit policy: an interrupted epoch still lands its report,
+  // but draining the queue into the model that just failed only burns retries.
+  return interruption ? "interrupted" : undefined;
 }
 
 /**
@@ -1846,10 +1981,12 @@ async function resumeTask(
 
 /**
  * Result of a task action. "started" means the prompt was delivered and Pi
- * reported the agent as active; the void members are actions that never start
- * a run at all (discard, finish, abort, suspend).
+ * reported the agent as active; "interrupted" means the finished epoch's last
+ * turn was cut off, so the loop must not drain the queue into that model; the
+ * void members are actions that never start a run at all (discard, finish,
+ * abort, suspend).
  */
-type TaskActionResult = "started" | "cancelled" | "launch-timeout" | "error" | void;
+type TaskActionResult = "started" | "cancelled" | "launch-timeout" | "interrupted" | "error" | void;
 
 /** Restore the model that was active before a task started, if one was recorded. */
 async function restorePreviousModel(

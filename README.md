@@ -108,6 +108,7 @@ Details worth knowing:
 - Context stays lean: at finish, the task's working transcript (its assistant/tool calls) is masked out of the following context via context-edit entries; the result message and delivered prompts stay.
 - `resume-task` works without navigation: the finished task's last report (its checkpoint) is re-injected together with your message, so a review-fix loop still works in RPC automation.
 - Aborting mid-task closes the task epoch at the boundary (`task-done{reason:"aborted"}`) and settles honestly — a later prompt does not trip over the half-finished task.
+- Interrupted tasks report instead of going silent: when a task's last turn is cut off (retries exhausted after an API error, or a cancelled turn) the epoch still closes — but with an interruption report instead of the empty result that used to reach the mainline. It names the cause and carries whatever text the branch produced before the cut (in the TUI the same text becomes the checkpoint, so the task stays resumable). Here the run then continues, so you still receive a real answer about the interrupted task; in the TUI auto stops instead and leaves the rest of the queue pending.
 
 ### Footer status
 
