@@ -85,6 +85,11 @@ describe("boundary drain (rpc flat mode)", () => {
       const dones = h.branchCustomData("task-done");
       assert.strictEqual(dones.length, 1);
       assert.strictEqual((dones[0] as { reason?: string }).reason, "aborted");
+      // The closure writes a resumable anchor; this epoch produced no text, so
+      // it carries no checkpoint but still names the abort as its reason.
+      const anchors = h.branchCustomData("task-suspended") as Array<{ reason?: string }>;
+      assert.strictEqual(anchors.length, 1);
+      assert.strictEqual(anchors[0].reason, "aborted");
 
       // The epoch is closed: a later prompt must not trip over the open task.
       await h.prompt("after");
@@ -321,26 +326,72 @@ describe("boundary drain (rpc flat mode)", () => {
     }
   });
 
-  it("discards a resume request for an aborted task that left no checkpoint", async () => {
+  it("resumes an aborted task from the anchor written at abort-close", async () => {
+    const h = await createRpcAutoHarness();
+    h.llm.onPrompt("main work", pushTask("X", "do X", true), responds("queued"));
+    // Round 1 writes the partial output the abort keeps as its anchor and
+    // trips the branch tool guard; round 2 is the turn the user cancels (pi
+    // appends it with an empty content array).
+    h.llm.onPromptSequence("do X", [
+      [responds("partial X work"), pushTask("nested", "not allowed in a branch")],
+      [responds("cancel this turn")],
+    ]);
+    h.user.onAssistant("cancel this turn", userEsc());
+    h.llm.onPrompt("resume it", resumeTask("X", "try again"), responds("resume queued"));
+    h.llm.onPrompt("try again", responds("X finished after the resume"));
+    h.llm.onPrompt("[task-result: X]", responds("noted"));
+
+    try {
+      await h.prompt("main work");
+      assert.strictEqual(h.settledCount(), 1);
+
+      const anchors = h.branchCustomData("task-suspended") as Array<{
+        content?: string;
+        reason?: string;
+      }>;
+      assert.strictEqual(anchors.length, 1);
+      assert.strictEqual(anchors[0].reason, "aborted");
+      assert.strictEqual(anchors[0].content, "partial X work", "the epoch's text is the anchor");
+
+      await h.prompt("resume it");
+      // The anchor makes the aborted epoch resumable in flat mode: the resume
+      // opens a new epoch and injects the checkpoint plus the message.
+      assert.strictEqual(h.settledCount(), 2);
+      assert.strictEqual(h.countBranchCustomEntries("task-start"), 2);
+      const starts = h.branchCustomData("task-start") as Array<{ resume?: boolean }>;
+      assert.strictEqual(starts[1].resume, true);
+      assert.strictEqual(h.countBranchCustomEntries("task-done"), 2);
+      const resumeRequest = h
+        .promptHistory()
+        .find((request) => request.some((message) => message.text.includes("Checkpoint:")));
+      assert.ok(resumeRequest, "the resumed run must receive a checkpoint request");
+      const resumeRequestText = resumeRequest.map((message) => message.text).join("\n");
+      assert.ok(resumeRequestText.includes("partial X work"), "anchor text injected");
+      assert.ok(resumeRequestText.includes("try again"), "resume message delivered");
+    } finally {
+      h.dispose();
+    }
+  });
+
+  it("discards a flat resume request whose title matches no anchor", async () => {
     const h = await createRpcAutoHarness();
     h.llm.onPrompt("main work", pushTask("X", "do X", true), responds("queued"));
     h.llm.onPrompt("do X", responds("partial X answer"));
     h.user.onAssistant("partial X answer", userEsc());
-    h.llm.onPrompt("resume it", resumeTask("X", "try again"), responds("resume queued"));
+    h.llm.onPrompt("resume it", resumeTask("Nope", "findings for nothing"), responds("queued"));
 
     try {
       await h.prompt("main work");
       assert.strictEqual(h.settledCount(), 1);
 
       await h.prompt("resume it");
-      // The abort erased the epoch's text, so there is no checkpoint to
-      // inject: the request is consumed with a warning instead of reopening
-      // the epoch, and the settle stays honest.
+      // The request names a task that has no anchor: it is consumed with a
+      // warning instead of reopening an epoch, and the settle stays honest.
       assert.strictEqual(h.settledCount(), 2);
       assert.strictEqual(h.countBranchCustomEntries("task-resume"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-resume-done"), 1);
       assert.strictEqual(h.countBranchCustomEntries("task-start"), 1, "no new epoch opened");
-      h.assertLastNotification('Resume request discarded: no resumable task titled "X".');
+      h.assertLastNotification('Resume request discarded: no resumable task titled "Nope".');
     } finally {
       h.dispose();
     }

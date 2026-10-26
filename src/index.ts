@@ -834,6 +834,9 @@ async function boundaryDrainAction(
   if (taskStart && aborted) {
     const title = taskMarkerTitle(taskStart.data.title) || "untitled";
     const checkpoint = lastAssistantText(session);
+    // The aborted turn itself has no text (pi appends it with an empty content
+    // array), so the epoch's newest text is what an anchor can carry.
+    const anchorContent = lastTaskText(session, taskStart.id) ?? checkpoint;
     const doneData: TaskDoneData = {
       title,
       ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
@@ -843,6 +846,19 @@ async function boundaryDrainAction(
     };
     const drafts: SessionBoundaryDraft[] = [
       { type: "custom", customType: TASK_DONE_ENTRY_TYPE, data: doneData },
+      // Resumable anchor: flat resumes have no navigation, so the checkpoint
+      // text on this entry is the only way back into the aborted run.
+      {
+        type: "custom",
+        customType: TASK_SUSPENDED_ENTRY_TYPE,
+        data: {
+          title,
+          branchLeafId: session.getLeafId() ?? "",
+          ...(anchorContent !== undefined ? { content: anchorContent } : {}),
+          ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+          reason: "aborted",
+        } satisfies TaskSuspendedData,
+      },
     ];
     if (taskStart.data.fork !== true && taskStart.data.restoreFromEntryId) {
       drafts.push(restoreCompactionDraft(taskStart.data));
@@ -891,6 +907,22 @@ async function boundaryDrainAction(
     const drafts: SessionBoundaryDraft[] = [
       { type: "custom", customType: TASK_DONE_ENTRY_TYPE, data: doneData },
     ];
+    if (interruption) {
+      // Resumable anchor: an interrupted epoch used to leave nothing a later
+      // resume could find. The partial output is the checkpoint a flat resume
+      // re-injects, so the mainline can reopen this run at the cut.
+      drafts.push({
+        type: "custom",
+        customType: TASK_SUSPENDED_ENTRY_TYPE,
+        data: {
+          title,
+          branchLeafId: session.getLeafId() ?? "",
+          ...(partialText !== undefined ? { content: partialText } : {}),
+          ...(taskStart.data.taskEntryId ? { taskEntryId: taskStart.data.taskEntryId } : {}),
+          reason: "interrupted",
+        } satisfies TaskSuspendedData,
+      });
+    }
     if (taskStart.data.fork !== true && taskStart.data.restoreFromEntryId) {
       drafts.push(restoreCompactionDraft(taskStart.data));
     }
@@ -1002,9 +1034,10 @@ async function boundaryDrainAction(
         taskResumeMarker(title) +
         // Flat resumes do not navigate: the previous branch is not in
         // context, so the framing says the state arrives as an injected
-        // checkpoint (the last report), not as the full transcript.
+        // checkpoint (the last report, or the partial output an interrupted
+        // run left behind), not as the full transcript.
         "This task is running again in the current context: it is not a new task, and its previous state " +
-        "is injected below as a checkpoint (the last report it produced), not as the full transcript. " +
+        "is injected below as a checkpoint (the last report or partial output it produced), not as the full transcript. " +
         "The follow-up input after the checkpoint (review findings or a correction) applies to that state. " +
         "Your final assistant message is the report to the mainline.\n\n" +
         checkpointBlock +
@@ -1643,7 +1676,12 @@ function interruptionReport(
   const partial = partialText
     ? `\n\nLast output before the interruption (cut off, not a report):\n${partialText}`
     : "";
-  return `${taskResultMarker(title)}⚠️ ${TASK_INTERRUPTED_FRAMING}\n\nCause: ${error}${partial}`;
+  // Deliberately a conditional instruction, not a retry order: the mainline
+  // must only reopen this run when the user asks for it. Message text, not
+  // framing - it is not part of any byte-stable prompt variant.
+  const resumeHint =
+    "\n\nIf the user asks to continue this task, call resume-task to reopen it at this point.";
+  return `${taskResultMarker(title)}⚠️ ${TASK_INTERRUPTED_FRAMING}\n\nCause: ${error}${partial}${resumeHint}`;
 }
 
 async function startTask(
@@ -2368,7 +2406,7 @@ interface TaskSuspendedData {
   branchLeafId: string;
   /** Checkpoint: the task's last assistant text, injected by flat resumes. */
   content?: string;
-  /** Legacy field (pre-checkpoint entries); read-compatible only. */
+  /** Informational label written by the interrupt/abort paths; not read by control flow. */
   reason?: string;
   /** Propagated from the task-start so resumed runs keep entry accounting. */
   taskEntryId?: string;
